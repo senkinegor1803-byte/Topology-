@@ -109,9 +109,13 @@ def get_job_files(job_id: uuid.UUID, conn=Depends(get_connection)) -> FilesRespo
     job = store.get_job(conn, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="задача не найдена")
-    files = [
-        FileOut(step_name=s.step_name, storage_key=s.result["storage_key"])
-        for s in job.steps
-        if s.status == store.STATUS_DONE and s.result and "storage_key" in s.result
-    ]
+    files: list[FileOut] = []
+    for s in job.steps:
+        if s.status != store.STATUS_DONE or not s.result:
+            continue
+        if "storage_key" in s.result:
+            files.append(FileOut(step_name=s.step_name, storage_key=s.result["storage_key"]))
+        for schema_name, schema_result in s.result.get("schemas", {}).items():
+            if "storage_key" in schema_result:
+                files.append(FileOut(step_name=f"{s.step_name}:{schema_name}", storage_key=schema_result["storage_key"]))
     return FilesResponse(job_id=job.id, status=job.status, files=files)

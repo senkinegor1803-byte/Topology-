@@ -1,10 +1,9 @@
 """Реализация шагов пайплайна задачи (Шаг 1.3).
 
-`select_osm`, `prepare_relief` и `select_and_normalize` — реальные шаги,
-использующие уже реализованные Шаги 1.1, 1.2 и 1.4. Более поздние шаги
-конвейера (TIN участка, здания, дороги, сборка IFC, веб-конвертация —
-Шаги 1.5-1.9) сюда пока не входят: `DEFAULT_PIPELINE` расширится вместе с их
-реализацией.
+`select_osm`, `prepare_relief`, `select_and_normalize` и `assemble_ifc` —
+реальные шаги, использующие уже реализованные Шаги 1.1, 1.2, 1.4-1.8. Веб-
+конвертация (IFC -> GLB, Шаг 1.9) сюда пока не входит: `DEFAULT_PIPELINE`
+расширится вместе с её реализацией.
 """
 
 from __future__ import annotations
@@ -18,16 +17,27 @@ import numpy as np
 from affine import Affine
 
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
+from topology_geo.geometry.buildings import extrude_buildings
+from topology_geo.geometry.rail import build_rail_ribbons
+from topology_geo.geometry.roads import build_road_ribbons
+from topology_geo.geometry.vegetation import build_individual_trees, scatter_forest_trees
+from topology_geo.geometry.water import build_water_areas, build_waterway_ribbons
+from topology_geo.ifc.assemble import BasePoint, SiteModel, build_site_ifc
+from topology_geo.ifc.generate_test_ifc import validate_model
+from topology_geo.ifc.registry import ensure_schema as ensure_ifc_registry_schema
+from topology_geo.ifc.registry import register_global_ids
 from topology_geo.jobs import store
 from topology_geo.osm.queries import count_within_radius
 from topology_geo.relief.cog import to_cog
 from topology_geo.relief.service import Grid, get_dem
+from topology_geo.relief.tin import build_site_tin
 from topology_geo.selection.geopackage import dataset_to_geopackage_bytes
 from topology_geo.selection.service import select_site_data
 from topology_geo.storage import ObjectStorage
 
 RELIEF_PIXEL_SIZE_M = 10.0
 RELIEF_MARGIN_M = 200.0
+IFC_SCHEMAS = ("IFC4", "IFC4X3")
 
 
 def select_osm(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
@@ -135,10 +145,84 @@ def select_and_normalize(conn: Any, storage: ObjectStorage, job: store.Job) -> d
     }
 
 
+def _read_relief_from_storage(storage: ObjectStorage, storage_key: str) -> tuple[np.ndarray, Grid]:
+    """Прочитать COG рельефа, сохранённый `prepare_relief`, обратно в массив
+    высот + `Grid` — не пересчитывать слияние заново (единственный источник
+    истины уже есть в хранилище)."""
+    from rasterio.io import MemoryFile
+
+    raw = storage.download(storage_key)
+    with MemoryFile(raw) as memfile, memfile.open() as src:
+        values = src.read(1)
+        crs = src.crs.to_proj4() if src.crs else ""
+        grid = Grid(transform=src.transform, width=src.width, height=src.height, crs=crs)
+    return values, grid
+
+
+def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
+    """Шаги 4-5 (Шаги 1.5-1.8): TIN участка, здания/дороги/вода/рельсы/деревья
+    и сборка `site.ifc` в обеих схемах (IFC4, IFC4X3), с реестром GlobalId в
+    PostGIS (Шаг 1.8, п. 2)."""
+    zone = pick_msk59_zone(job.center_lon)
+    center_x, center_y, _ = wgs84_to_msk59(job.center_lon, job.center_lat, zone=zone)
+
+    try:
+        dataset = select_site_data(conn, job.center_lon, job.center_lat, job.radius_m)
+    except Exception as exc:
+        raise RuntimeError(
+            "нет данных OSM для этой области (проверьте, что выполнен импорт по Шагу 1.1)"
+        ) from exc
+
+    relief_values, relief_grid = _read_relief_from_storage(storage, f"jobs/{job.id}/relief.tif")
+    tin = build_site_tin(relief_values, relief_grid, center_x, center_y, job.radius_m, dataset.features)
+
+    buildings = extrude_buildings(dataset.features, tin.interpolate_z)
+    roads = build_road_ribbons(dataset.features)
+    water_areas = build_water_areas(dataset.features, tin.interpolate_z)
+    waterways = build_waterway_ribbons(dataset.features)
+    rail = build_rail_ribbons(dataset.features)
+    trees = build_individual_trees(dataset.features) + scatter_forest_trees(dataset.features)
+
+    site_model = SiteModel(
+        tin=tin, buildings=buildings, roads=roads,
+        water_areas=water_areas, waterways=waterways, rail=rail, trees=trees,
+    )
+    base_point = BasePoint(
+        lon=job.center_lon, lat=job.center_lat, zone=zone, x=center_x, y=center_y,
+        height=tin.interpolate_z(0.0, 0.0) or 0.0,
+    )
+
+    ensure_ifc_registry_schema(conn)
+    model_id = str(job.id)
+    schemas: dict[str, dict] = {}
+    for schema in IFC_SCHEMAS:
+        model, registry = build_site_ifc(schema, site_model, base_point)
+        issues = validate_model(model)
+        if issues:
+            raise RuntimeError(f"site.ifc ({schema}) не прошёл ifcopenshell.validate: {issues[:3]!r}")
+        register_global_ids(conn, model_id, registry)
+
+        key = f"jobs/{job.id}/site_{schema.lower()}.ifc"
+        storage.upload(key, model.to_string().encode("utf-8"), content_type="application/x-step")
+        schemas[schema] = {"storage_key": key, "product_count": len(model.by_type("IfcProduct"))}
+
+    return {
+        "schemas": schemas,
+        "tin_vertices": int(tin.vertices.shape[0]),
+        "buildings": len(buildings),
+        "roads": len(roads),
+        "water_areas": len(water_areas),
+        "waterways": len(waterways),
+        "rail": len(rail),
+        "trees": len(trees),
+    }
+
+
 DEFAULT_PIPELINE: dict[str, Any] = {
     "select_osm": select_osm,
     "prepare_relief": prepare_relief,
     "select_and_normalize": select_and_normalize,
+    "assemble_ifc": assemble_ifc,
 }
 
 DEFAULT_STEP_NAMES: list[str] = list(DEFAULT_PIPELINE)

@@ -11,21 +11,24 @@
 flowchart LR
     subgraph Реализовано
         C1["§1 Координаты/высоты<br/>coords.py"]:::done
-        R1["§2.4 Сшивка рельефа<br/>relief/merge.py"]:::done
-        Q1["§2.1 Буфер выборки<br/>osm/queries.py (уже применяется)"]:::done
+        R1["§2.4 Рельеф: TIN + сшивка<br/>relief/{tin,merge}.py"]:::done
+        Q1["§2.1 Буфер выборки<br/>osm/queries.py"]:::done
+        T4["§2.5 Высота зданий<br/>geometry/buildings.py"]:::done
+        T6["§2.7 Дороги/вода/рельсы/деревья<br/>geometry/{roads,water,rail,vegetation}.py"]:::done
+        T7["§2.8 Сборка IFC<br/>ifc/assemble.py"]:::done
     end
     subgraph Заготовка
         T1["§2.2 Кольца LOD"]:::todo
         T2["§2.3 Тайлы"]:::todo
-        T3["§2.4 Адаптивный TIN"]:::todo
-        T4["§2.5 Высота зданий"]:::todo
         T5["§2.6 Огибающая застройки"]:::todo
     end
 
     C1 --> R1
     C1 --> Q1
-    Q1 -.Шаг 1.4.-> T3
-    T3 --> T4
+    Q1 -.Шаг 1.4.-> R1
+    R1 --> T4
+    T4 --> T6
+    T6 --> T7
     T1 --> T2
 
     classDef done fill:#bbf7d0,stroke:#15803d,color:#111;
@@ -234,6 +237,64 @@ height_limit = min(height_limit_pzz, height_limit_airport, height_limit_okn)
 ```
 
 где `⊖` — эрозия полигона на величину отступа, `\` — разность множеств.
+
+### 2.7 Дороги, вода, рельсы, деревья (Шаг 1.7) — реализовано
+
+Код: `geo/src/topology_geo/geometry/{roads,water,rail,vegetation}.py`. Тесты:
+`geo/tests/test_geometry_environment.py` (17 тестов).
+
+```
+ribbon(line, width) = ⋃ line.buffer(width/2, cap="flat")     [дороги, ручьи, балласт ж/д]
+level_z(area)       = min(relief(p) for p in ∂area)           [урез воды, та же формула, что z_base зданий §2.5]
+```
+
+Ширина дороги — `tag(width)` (confidence "факт") или таблица по классу
+`highway=*` (`WIDTH_BY_HIGHWAY_CLASS`, confidence "умолчание"). Деревья:
+одиночные точки (`natural=tree`) с породой из тега или дефолтом; массивы
+(`natural=wood`, `landuse=forest|grass`) — расстановка методом отбраковки
+(точка в bounding box принимается, если попадает в полигон) с плотностью
+`density_per_ha` (по умолчанию 400/га), детерминированная при фиксированном
+`seed` (см. тест на воспроизводимость). Проверено точной геометрией: площадь
+ленты прямой линии равна `length × width` (buffer с плоскими торцами даёт
+ровно прямоугольник, без допуска).
+
+### 2.8 Сборка IFC: полигон → меш, объём призмы (Шаг 1.8) — реализовано
+
+Код: `geo/src/topology_geo/ifc/assemble.py`. Тесты:
+`geo/tests/test_ifc_assemble.py` (23 теста).
+
+Триангуляция контура (возможно, невыпуклого, возможно, с отверстиями) —
+`mapbox_earcut` (у `shapely` нет триангуляции, ограниченной контуром
+полигона). Экструзия здания — призма: низ на `z_base` (§2.5), верх на
+`z_base + height` (§2.5), стены — по ВСЕМ кольцам контура (внешнему и
+внутренним/дворам), а не только по внешнему:
+
+```
+V = (1/6) · Σ_triangles  v0 · (v1 × v2)      [объём замкнутого меша, теорема о дивергенции]
+```
+
+Реальная находка при разработке: первая версия строила стены только по
+внешнему кольцу («упрощённо» показалось достаточным для двора) — расчёт
+объёма по этой формуле для здания с двором дал 4544 м³ вместо ожидаемых
+4032 м³ (= `footprint.area × height`, где `footprint.area` уже учитывает
+вычет двора у `shapely`): меш не был замкнут, был как труба без крышки
+через двор. После добавления стен по всем кольцам объём совпал с
+`footprint.area × height` с точностью до 1e-9 на квадрате, Г-образном
+(невыпуклом) контуре и контуре с двором — тест
+`test_extrude_polygon_mesh_volume_matches_footprint_area_times_height`
+(параметризован тремя случаями) плюс `test_extrude_polygon_mesh_is_watertight_manifold`
+(каждое ребро встречается ровно в двух треугольниках, в противоположных
+направлениях — необходимое условие замкнутости).
+
+Схема IFC (Шаг 0.2, приём совместимости): `IfcRoad` нативно в IFC4X3
+(`IfcSpatialElement`, роднится с `IfcSite` через `aggregate.assign_object`,
+как и сам сайт с проектом); в IFC4 схема класс не знает — используется
+`IfcBuildingElementProxy` (обычный `IfcElement`, через
+`spatial.assign_container`) с пометкой в `Pset_Контекст.Заменяет_класс`.
+Реестр `osm_id → GlobalId` (`geo/src/topology_geo/ifc/registry.py`,
+таблица `ifc_globalid_registry`, PostGIS) — по одной записи на каждый
+исходный объект слоёв 1.5-1.7, независимо от схемы, с `UPSERT` при
+пересборке модели с теми же исходными объектами (без дублей строк).
 
 ## 3. Как обновлять этот документ
 

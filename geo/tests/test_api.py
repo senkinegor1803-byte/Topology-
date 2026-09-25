@@ -172,4 +172,7 @@ def test_full_happy_path_creates_downloadable_files(pg_test_db, tmp_path, monkey
         files_resp = client.get(f"/models/{job_id}/files")
         assert files_resp.status_code == 200
         files = files_resp.json()["files"]
-        assert {f["step_name"] for f in files} == {"select_osm", "prepare_relief", "select_and_normalize"}
+        assert {f["step_name"] for f in files} == {
+            "select_osm", "prepare_relief", "select_and_normalize",
+            "assemble_ifc:IFC4", "assemble_ifc:IFC4X3",
+        }
