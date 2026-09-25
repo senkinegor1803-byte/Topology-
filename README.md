@@ -23,6 +23,7 @@ geo/            Python-пакет конвейера геоданных (PostGIS
     ifc/             генерация и валидация IFC
     osm/             импорт, журнал источников, запросы, аудит полноты OSM
     relief/          репроекция, высоты, COG, слияние, покрытие, get_dem
+    selection/       выборка, обрезка, нормализация, GeoPackage (Шаг 1.4)
     jobs/            модель задач, движок пайплайна, реальные шаги (Шаг 1.3)
     tasks/           очередь Celery + Redis (Шаг 1.3)
     api/             FastAPI: POST /jobs, GET /jobs/{id}, GET /models/{id}/files
@@ -59,7 +60,10 @@ uvicorn topology_geo.api.app:app --reload   # API
 celery -A topology_geo.tasks.celery_app worker --loglevel=info  # воркер
 ```
 
-Интеграционные тесты Шагов 1.1-1.3 требуют системный `osm2pgsql`
+Выборка и нормализация данных участка (Шаг 1.4) — см.
+[docs/selection.md](docs/selection.md).
+
+Интеграционные тесты Шагов 1.1-1.4 требуют системный `osm2pgsql`
 (`apt-get install osm2pgsql`) и доступные Postgres+PostGIS и Redis — без них
 соответствующие тесты пропускаются, но реально прогоняются в CI.
 

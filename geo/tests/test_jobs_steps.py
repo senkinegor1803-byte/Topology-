@@ -18,8 +18,10 @@ import rasterio
 from rasterio.transform import from_origin
 from rio_cogeo.cogeo import cog_validate
 
+import pyogrio
+
 from topology_geo.jobs import store
-from topology_geo.jobs.steps import prepare_relief, select_osm
+from topology_geo.jobs.steps import prepare_relief, select_and_normalize, select_osm
 from topology_geo.relief.coverage import CoverageEntry, ensure_schema as ensure_relief_schema, register_coverage
 from topology_geo.storage import InMemoryObjectStorage
 
@@ -150,3 +152,76 @@ def test_prepare_relief_raises_clear_error_without_coverage(pg_test_db):
 
     with pytest.raises(RuntimeError, match="нет данных рельефа в этой области"):
         prepare_relief(pg_test_db, storage, job)
+
+
+@pytest.mark.skipif(not _osm2pgsql_available(), reason="требуется системный osm2pgsql")
+def test_select_and_normalize_produces_geopackage(pg_test_db, tmp_path):
+    import os
+
+    osm_file = tmp_path / "sample.osm"
+    osm_file.write_text(SAMPLE_OSM_XML, encoding="utf-8")
+    subprocess.run(
+        [
+            "osm2pgsql", "--output=flex", f"--style={STYLE_LUA}",
+            f"--host={os.environ.get('POSTGRES_HOST', 'localhost')}",
+            f"--port={os.environ.get('POSTGRES_PORT', '5432')}",
+            f"--user={os.environ.get('POSTGRES_USER', 'topology')}",
+            f"--database={pg_test_db.info.dbname}", str(osm_file),
+        ],
+        check=True, capture_output=True, text=True,
+        env={**os.environ, "PGPASSWORD": os.environ.get("POSTGRES_PASSWORD", "topology")},
+    )
+
+    job = _make_job(pg_test_db, step_names=["select_and_normalize"])
+    storage = InMemoryObjectStorage()
+
+    result = select_and_normalize(pg_test_db, storage, job)
+
+    assert result["feature_count"] == 1
+    assert result["layers"] == {"osm_buildings": 1}
+    assert result["zone"] == 2
+
+    gpkg_bytes = storage.download(result["storage_key"])
+    gpkg_path = tmp_path / "out.gpkg"
+    gpkg_path.write_bytes(gpkg_bytes)
+    layers = {name for name, _ in pyogrio.list_layers(gpkg_path)}
+    assert layers == {"osm_buildings"}
+
+
+def test_select_and_normalize_raises_clear_error_without_osm_tables(pg_test_db):
+    job = _make_job(pg_test_db, step_names=["select_and_normalize"])
+    storage = InMemoryObjectStorage()
+
+    with pytest.raises(RuntimeError, match="нет данных OSM"):
+        select_and_normalize(pg_test_db, storage, job)
+
+
+@pytest.mark.skipif(not _osm2pgsql_available(), reason="требуется системный osm2pgsql")
+def test_select_and_normalize_raises_when_nothing_in_radius(pg_test_db, tmp_path):
+    import os
+
+    osm_file = tmp_path / "sample.osm"
+    osm_file.write_text(SAMPLE_OSM_XML, encoding="utf-8")
+    subprocess.run(
+        [
+            "osm2pgsql", "--output=flex", f"--style={STYLE_LUA}",
+            f"--host={os.environ.get('POSTGRES_HOST', 'localhost')}",
+            f"--port={os.environ.get('POSTGRES_PORT', '5432')}",
+            f"--user={os.environ.get('POSTGRES_USER', 'topology')}",
+            f"--database={pg_test_db.info.dbname}", str(osm_file),
+        ],
+        check=True, capture_output=True, text=True,
+        env={**os.environ, "PGPASSWORD": os.environ.get("POSTGRES_PASSWORD", "topology")},
+    )
+
+    # задача далеко от загруженного здания (но всё ещё в зоне МСК-59) ->
+    # в буфере нет объектов
+    store.ensure_schema(pg_test_db)
+    job = store.create_job(
+        pg_test_db, center_lon=57.0, center_lat=58.0, radius_m=500.0,
+        layers=[], detail="LOD1", step_names=["select_and_normalize"],
+    )
+    storage = InMemoryObjectStorage()
+
+    with pytest.raises(ValueError, match="нет ни одного объекта"):
+        select_and_normalize(pg_test_db, storage, job)

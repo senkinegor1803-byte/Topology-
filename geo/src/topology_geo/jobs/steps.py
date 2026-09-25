@@ -1,9 +1,10 @@
 """Реализация шагов пайплайна задачи (Шаг 1.3).
 
-`select_osm` и `prepare_relief` — реальные шаги, использующие уже
-реализованные Шаги 1.1 и 1.2. Более поздние шаги конвейера (выборка/TIN
-участка, здания, дороги, сборка IFC, веб-конвертация — Шаги 1.4-1.9) сюда
-пока не входят: `DEFAULT_PIPELINE` расширится вместе с их реализацией.
+`select_osm`, `prepare_relief` и `select_and_normalize` — реальные шаги,
+использующие уже реализованные Шаги 1.1, 1.2 и 1.4. Более поздние шаги
+конвейера (TIN участка, здания, дороги, сборка IFC, веб-конвертация —
+Шаги 1.5-1.9) сюда пока не входят: `DEFAULT_PIPELINE` расширится вместе с их
+реализацией.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from topology_geo.jobs import store
 from topology_geo.osm.queries import count_within_radius
 from topology_geo.relief.cog import to_cog
 from topology_geo.relief.service import Grid, get_dem
+from topology_geo.selection.geopackage import dataset_to_geopackage_bytes
+from topology_geo.selection.service import select_site_data
 from topology_geo.storage import ObjectStorage
 
 RELIEF_PIXEL_SIZE_M = 10.0
@@ -109,9 +112,33 @@ def prepare_relief(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     }
 
 
+def select_and_normalize(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
+    """Шаг 3: выборка, обрезка кругом и нормализация атрибутов данных участка
+    (Шаг 1.4) — «чистый набор данных участка, одинаковый для всех дальнейших
+    генераторов», сохранён как GeoPackage."""
+    try:
+        dataset = select_site_data(conn, job.center_lon, job.center_lat, job.radius_m)
+    except Exception as exc:  # noqa: BLE001 - таблиц может не быть, если импорт (Шаг 1.1) не запускался
+        raise RuntimeError(
+            "нет данных OSM для этой области (проверьте, что выполнен импорт по Шагу 1.1)"
+        ) from exc
+
+    gpkg_bytes = dataset_to_geopackage_bytes(dataset)
+
+    key = f"jobs/{job.id}/site.gpkg"
+    storage.upload(key, gpkg_bytes, content_type="application/geopackage+sqlite3")
+    return {
+        "storage_key": key,
+        "zone": dataset.zone,
+        "feature_count": len(dataset.features),
+        "layers": {layer: len(features) for layer, features in dataset.by_layer().items()},
+    }
+
+
 DEFAULT_PIPELINE: dict[str, Any] = {
     "select_osm": select_osm,
     "prepare_relief": prepare_relief,
+    "select_and_normalize": select_and_normalize,
 }
 
 DEFAULT_STEP_NAMES: list[str] = list(DEFAULT_PIPELINE)

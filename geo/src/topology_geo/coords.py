@@ -108,6 +108,23 @@ def msk59_to_wgs84(x: float, y: float, zone: int) -> tuple[float, float]:
     return lon, lat
 
 
+def transform_geometry_to_msk59(geom, zone: int):
+    """Репроецировать shapely-геометрию (любого типа: точка/линия/полигон/
+    мульти-) из WGS-84 в МСК-59 зоны `zone` — то же преобразование, что
+    `wgs84_to_msk59` для точек, но применённое ко всем вершинам геометрии
+    (Шаг 1.4: выборка объектов OSM хранится в 4326, обработка участка ведётся
+    в проекционных метрах).
+    """
+    from shapely.ops import transform as shapely_transform
+
+    transformer = _transformer_for_zone(zone, inverse=False)
+
+    def _project(x, y):
+        return transformer.transform(x, y)
+
+    return shapely_transform(_project, geom)
+
+
 @dataclass(frozen=True)
 class ControlPoint:
     """Контрольная точка для проверки/калибровки пересчёта (Шаг 0.4, п. 3)."""

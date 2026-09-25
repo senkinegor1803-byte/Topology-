@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import pytest
 
+from shapely.geometry import LineString, Point, Polygon
+
 from topology_geo.coords import (
     MSK59_ZONES,
     ControlPoint,
     fit_height_offset,
     msk59_to_wgs84,
     pick_msk59_zone,
+    transform_geometry_to_msk59,
     verify_heights,
     verify_planimetric,
     wgs84_to_msk59,
@@ -107,3 +110,36 @@ def test_fit_height_offset_with_single_point_uses_constant():
     assert model.offset == pytest.approx(-14.7)
     assert model.grad_x == 0.0
     assert model.grad_y == 0.0
+
+
+def test_transform_geometry_point_matches_scalar_transform():
+    zone = 2
+    x, y, _ = wgs84_to_msk59(PERM_CENTER_LON, PERM_CENTER_LAT, zone=zone)
+    transformed = transform_geometry_to_msk59(Point(PERM_CENTER_LON, PERM_CENTER_LAT), zone=zone)
+    assert transformed.x == pytest.approx(x)
+    assert transformed.y == pytest.approx(y)
+
+
+def test_transform_geometry_line_preserves_vertex_count_and_order():
+    zone = 2
+    line = LineString([(PERM_CENTER_LON, PERM_CENTER_LAT), (PERM_CENTER_LON + 0.01, PERM_CENTER_LAT + 0.01)])
+    transformed = transform_geometry_to_msk59(line, zone=zone)
+    assert len(transformed.coords) == 2
+    x0, y0, _ = wgs84_to_msk59(PERM_CENTER_LON, PERM_CENTER_LAT, zone=zone)
+    assert transformed.coords[0] == pytest.approx((x0, y0))
+
+
+def test_transform_geometry_polygon_stays_valid_and_closed():
+    zone = 2
+    poly = Polygon(
+        [
+            (PERM_CENTER_LON, PERM_CENTER_LAT),
+            (PERM_CENTER_LON + 0.001, PERM_CENTER_LAT),
+            (PERM_CENTER_LON + 0.001, PERM_CENTER_LAT + 0.001),
+            (PERM_CENTER_LON, PERM_CENTER_LAT + 0.001),
+        ]
+    )
+    transformed = transform_geometry_to_msk59(poly, zone=zone)
+    assert transformed.is_valid
+    assert transformed.exterior.coords[0] == transformed.exterior.coords[-1]
+    assert transformed.area > 0
