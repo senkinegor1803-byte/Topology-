@@ -24,6 +24,8 @@ dependencies = [
     "pydantic>=2.6",
     "geopandas>=1.0",
     "pyogrio>=0.9",
+    "mapbox-earcut>=1.0",
+    "pygltflib>=1.16",
 ]
 
 [project.optional-dependencies]
