@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "topology-geo"
+version = "0.0.1"
+description = "Конвейер геоданных проекта Топология: координаты, IFC, OSM"
+requires-python = ">=3.11"
+dependencies = [
+    "ifcopenshell>=0.8",
+    "pyproj>=3.6",
+    "shapely>=2.0",
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "minio>=7.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "jsonschema>=4.20",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

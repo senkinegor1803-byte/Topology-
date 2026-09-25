@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://topology.local/schemas/meta.schema.json",
+  "title": "Topology export package metadata (meta.json)",
+  "description": "Метаданные пакета выгрузки конвейера (Шаг 0.8, Шаг 2.10 плана). Один meta.json на каждую задачу /jobs/{id}.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "created_at",
+    "generator_version",
+    "center",
+    "radius_m",
+    "coordinate_system",
+    "layers",
+    "files",
+    "sources"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "Идентификатор задачи (POST /jobs, Шаг 1.3)."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "generator_version": {
+      "type": "string",
+      "description": "Версия конвейера (semver или git sha), для тайлового кэша Шага 2.1."
+    },
+    "center": {
+      "type": "object",
+      "required": ["lon", "lat"],
+      "properties": {
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 }
+      }
+    },
+    "radius_m": {
+      "type": "number",
+      "minimum": 500,
+      "maximum": 3000,
+      "description": "Радиус задачи, м (Шаг 1.3, п. 3: диапазон 0.5-3 км)."
+    },
+    "coordinate_system": {
+      "type": "object",
+      "required": ["projected_crs", "zone", "height_system"],
+      "properties": {
+        "projected_crs": { "type": "string", "const": "MSK-59" },
+        "zone": { "type": "integer", "enum": [1, 2, 3] },
+        "height_system": { "type": "string", "enum": ["Балтийская", "EGM96"] },
+        "base_point": {
+          "type": "object",
+          "description": "Базовая точка проекта, передаваемая в IfcMapConversion (Шаг 0.4, п. 4).",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "height": { "type": "number" }
+          }
+        }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "description": "Слои, включённые в пакет (см. docs/data-dictionary.md, §4).",
+      "items": {
+        "type": "object",
+        "required": ["name", "lod", "status"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "relief", "roads_backbone", "roads_local", "buildings",
+              "power", "networks", "constraints", "vegetation", "site"
+            ]
+          },
+          "lod": { "type": "string", "enum": ["LOD0", "LOD1", "LOD2"] },
+          "status": { "type": "string", "enum": ["официально", "расчётно", "умолчание"] }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "description": "Файлы пакета выгрузки.",
+      "items": {
+        "type": "object",
+        "required": ["path", "format", "layer"],
+        "properties": {
+          "path": { "type": "string" },
+          "format": {
+            "type": "string",
+            "enum": ["IFC4", "IFC4X3", "LandXML", "DXF", "CityJSON", "GeoPackage", "GLB", "XKT"]
+          },
+          "layer": { "type": "string" },
+          "size_bytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "description": "Журнал источников данных (сквозной процесс «Данные», docs/plan.md).",
+      "items": {
+        "type": "object",
+        "required": ["name", "retrieved_at", "license"],
+        "properties": {
+          "name": { "type": "string", "examples": ["OSM Приволжский ФО (Geofabrik)", "TessaDEM", "Топосъёмка 1:500"] },
+          "retrieved_at": { "type": "string", "format": "date" },
+          "license": { "type": "string", "examples": ["ODbL", "проприетарная, закрытый контур"] },
+          "url": { "type": "string", "format": "uri" }
+        }
+      }
+    }
+  }
+}

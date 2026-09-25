@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.ifc.bak
+
+# Local env / secrets
+.env
+*.env.local
+
+# Data & generated artifacts (large binary, not for git)
+/data/
+/geo/tests/output/
+*.gpkg
+*.tif
+*.tiff
+*.pbf
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
