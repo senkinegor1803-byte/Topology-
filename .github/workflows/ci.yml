@@ -22,6 +22,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        # Шаг 1.3: очередь задач (Celery) и её интеграционный тест с реальным
+        # воркером в отдельном процессе (geo/tests/test_tasks_celery.py).
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # Шаг 1.1: интеграционные тесты osm2pgsql (geo/tests/test_osm_import_style.py)
       # создают/удаляют свои временные БД на этом сервисе и требуют

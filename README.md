@@ -23,6 +23,10 @@ geo/            Python-пакет конвейера геоданных (PostGIS
     ifc/             генерация и валидация IFC
     osm/             импорт, журнал источников, запросы, аудит полноты OSM
     relief/          репроекция, высоты, COG, слияние, покрытие, get_dem
+    jobs/            модель задач, движок пайплайна, реальные шаги (Шаг 1.3)
+    tasks/           очередь Celery + Redis (Шаг 1.3)
+    api/             FastAPI: POST /jobs, GET /jobs/{id}, GET /models/{id}/files
+    storage.py       объектное хранилище (MinIO/файловое/в памяти)
   tests/            модульные и интеграционные тесты (pytest)
 infra/          Docker Compose для локальной разработки (PostGIS, MinIO, Redis)
 docs/           план, словарь данных, системы координат, прочая документация
@@ -47,10 +51,17 @@ pytest
 Импорт OSM в PostGIS (Шаг 1.1) — см. [docs/osm-import.md](docs/osm-import.md)
 (`geo/scripts/import_osm.sh`, флекс-стиль `geo/osm2pgsql/style.lua`).
 Подготовка рельефа (Шаг 1.2, `get_dem(bbox)`) — см.
-[docs/relief.md](docs/relief.md). Интеграционные тесты обоих шагов требуют
-системный `osm2pgsql` (`apt-get install osm2pgsql`) и доступный
-Postgres+PostGIS — без них соответствующие тесты пропускаются, но реально
-прогоняются в CI.
+[docs/relief.md](docs/relief.md). API и очередь задач (Шаг 1.3,
+FastAPI + Celery/Redis) — см. [docs/api.md](docs/api.md):
+
+```bash
+uvicorn topology_geo.api.app:app --reload   # API
+celery -A topology_geo.tasks.celery_app worker --loglevel=info  # воркер
+```
+
+Интеграционные тесты Шагов 1.1-1.3 требуют системный `osm2pgsql`
+(`apt-get install osm2pgsql`) и доступные Postgres+PostGIS и Redis — без них
+соответствующие тесты пропускаются, но реально прогоняются в CI.
 
 ## Роли и участие AI
 
