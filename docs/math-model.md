@@ -16,6 +16,7 @@ flowchart LR
         T4["§2.5 Высота зданий<br/>geometry/buildings.py"]:::done
         T6["§2.7 Дороги/вода/рельсы/деревья<br/>geometry/{roads,water,rail,vegetation}.py"]:::done
         T7["§2.8 Сборка IFC<br/>ifc/assemble.py"]:::done
+        T8["§2.9 IFC → GLB<br/>ifc/to_glb.py"]:::done
     end
     subgraph Заготовка
         T1["§2.2 Кольца LOD"]:::todo
@@ -29,6 +30,7 @@ flowchart LR
     R1 --> T4
     T4 --> T6
     T6 --> T7
+    T7 --> T8
     T1 --> T2
 
     classDef done fill:#bbf7d0,stroke:#15803d,color:#111;
@@ -295,6 +297,22 @@ V = (1/6) · Σ_triangles  v0 · (v1 × v2)      [объём замкнутог�
 таблица `ifc_globalid_registry`, PostGIS) — по одной записи на каждый
 исходный объект слоёв 1.5-1.7, независимо от схемы, с `UPSERT` при
 пересборке модели с теми же исходными объектами (без дублей строк).
+
+### 2.9 IFC → GLB для веб-просмотра (Шаг 1.9) — реализовано
+
+Код: `geo/src/topology_geo/ifc/to_glb.py`. Тесты:
+`geo/tests/test_ifc_to_glb.py`, `geo/tests/test_viewer_browser.py`.
+
+Не пересборка из `SiteModel`, а обход уже собранной IFC-модели
+(`ifcopenshell.geom.iterator`, мировые координаты) — GLB остаётся
+производным представлением, IFC — источником истины. Каждый объект с
+геометрией → один узел glTF (позиции + индексы треугольников; нормали не
+пишутся, вьюер считает их сам через `computeVertexNormals` — дешевле, чем
+считать дважды для IFC4 и IFC4X3) с `extras = {globalId, ifcClass, psets}`
+(словарь данных, §1 `docs/data-dictionary.md`) для панели свойств. Узлы
+группируются в узлы-категории по классу IFC (с уточнением по имени там, где
+один класс использован для нескольких слоёв Шага 1.8 — прокси) — это и есть
+«слои» и «дерево объектов» вьюера, без отдельного файла метаданных.
 
 ## 3. Как обновлять этот документ
 

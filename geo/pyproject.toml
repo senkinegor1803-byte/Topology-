@@ -34,10 +34,14 @@ dev = [
     "ruff>=0.6",
     "jsonschema>=4.20",
     "httpx>=0.27",
+    "playwright>=1.40",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+topology_geo = ["web/viewer/*.html", "web/viewer/vendor/*.js", "web/viewer/vendor/utils/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

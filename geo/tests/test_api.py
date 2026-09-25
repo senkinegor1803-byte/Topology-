@@ -121,6 +121,32 @@ def test_get_files_returns_404_for_unknown_job(client):
     assert resp.status_code == 404
 
 
+def test_download_rejects_key_belonging_to_a_different_job(client):
+    resp = client.post("/jobs", json={"center": {"lon": 56.24, "lat": 58.01}, "radius_m": 500})
+    job_id = resp.json()["id"]
+
+    foreign_key = f"jobs/{job_id}/site.glb"
+    other_resp = client.post("/jobs", json={"center": {"lon": 56.24, "lat": 58.01}, "radius_m": 500})
+    other_job_id = other_resp.json()["id"]
+
+    resp = client.get(f"/models/{other_job_id}/download?key={foreign_key}")
+    assert resp.status_code == 404
+
+
+def test_download_returns_404_for_missing_key(client):
+    resp = client.post("/jobs", json={"center": {"lon": 56.24, "lat": 58.01}, "radius_m": 500})
+    job_id = resp.json()["id"]
+
+    resp = client.get(f"/models/{job_id}/download?key=jobs/{job_id}/does_not_exist.glb")
+    assert resp.status_code == 404
+
+
+def test_viewer_static_page_is_served(client):
+    resp = client.get("/viewer/index.html")
+    assert resp.status_code == 200
+    assert b"three" in resp.content
+
+
 @pytest.mark.skipif(not _osm2pgsql_available(), reason="требуется системный osm2pgsql")
 def test_full_happy_path_creates_downloadable_files(pg_test_db, tmp_path, monkeypatch):
     dbname = pg_test_db.info.dbname
@@ -174,5 +200,25 @@ def test_full_happy_path_creates_downloadable_files(pg_test_db, tmp_path, monkey
         files = files_resp.json()["files"]
         assert {f["step_name"] for f in files} == {
             "select_osm", "prepare_relief", "select_and_normalize",
-            "assemble_ifc:IFC4", "assemble_ifc:IFC4X3",
+            "assemble_ifc:IFC4", "assemble_ifc:IFC4X3", "convert_to_glb",
         }
+
+        glb_file = next(f for f in files if f["step_name"] == "convert_to_glb")
+        assert glb_file["viewer_url"] is not None
+        assert glb_file["viewer_url"].startswith("/viewer/index.html?model=")
+        for f in files:
+            assert f["viewer_url"] is None or f["step_name"] == "convert_to_glb"
+
+        download_resp = client.get(glb_file["download_url"])
+        assert download_resp.status_code == 200
+        assert download_resp.headers["content-type"] == "model/gltf-binary"
+        assert download_resp.content[:4] == b"glTF"
+
+        viewer_path = glb_file["viewer_url"].split("?", 1)[0]
+        viewer_resp = client.get(viewer_path)
+        assert viewer_resp.status_code == 200
+        assert b"<title>" in viewer_resp.content
+
+        other_job_id = "00000000-0000-0000-0000-000000000000"
+        forbidden_resp = client.get(f"/models/{other_job_id}/download?key={glb_file['storage_key']}")
+        assert forbidden_resp.status_code == 404

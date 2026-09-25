@@ -55,6 +55,10 @@ jobs:
         working-directory: geo
         run: pip install -e ".[dev]"
 
+      - name: Install Playwright Chromium
+        # Шаг 1.9: тест вьюера в настоящем браузере (geo/tests/test_viewer_browser.py).
+        run: python -m playwright install --with-deps chromium
+
       - name: Ruff lint
         working-directory: geo
         run: ruff check src tests

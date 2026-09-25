@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Топология — просмотр модели</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, sans-serif; background: #14161a; color: #e6e6e6; }
+  #app { display: flex; height: 100%; width: 100%; }
+  #tree-panel, #props-panel {
+    width: 280px; flex: 0 0 auto; background: #1c1f24; overflow-y: auto;
+    padding: 12px; border-right: 1px solid #2a2e35;
+  }
+  #props-panel { border-right: none; border-left: 1px solid #2a2e35; }
+  #viewport-wrap { flex: 1 1 auto; position: relative; min-width: 0; }
+  #viewport { width: 100%; height: 100%; display: block; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #9aa4b2; margin: 0 0 10px; }
+  .layer { margin-bottom: 4px; }
+  .layer > label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 600; padding: 4px 2px; }
+  .layer ul { list-style: none; margin: 0 0 4px 20px; padding: 0; }
+  .layer li { padding: 3px 4px; border-radius: 4px; cursor: pointer; font-size: 13px; color: #c3cad4; }
+  .layer li:hover { background: #2a2e35; }
+  .layer li.selected { background: #35507a; color: #fff; }
+  #status { position: absolute; top: 8px; left: 8px; font-size: 12px; color: #9aa4b2; background: rgba(0,0,0,.4); padding: 4px 8px; border-radius: 4px; }
+  #props-panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  #props-panel td { padding: 3px 2px; border-bottom: 1px solid #2a2e35; vertical-align: top; word-break: break-word; }
+  #props-panel td.k { color: #9aa4b2; width: 45%; }
+  #props-panel .pset-name { color: #7fb2ff; margin-top: 10px; font-weight: 600; font-size: 12px; }
+  #empty-hint { color: #6b7280; font-size: 13px; }
+  #error-banner {
+    display: none; position: absolute; top: 0; left: 0; right: 0; padding: 10px 16px;
+    background: #7a2020; color: #fff; font-size: 13px; z-index: 10;
+  }
+  @media (max-width: 720px) {
+    #app { flex-direction: column; }
+    #tree-panel, #props-panel { width: 100%; height: 160px; border: none; border-bottom: 1px solid #2a2e35; }
+    #viewport-wrap { flex: 1 1 auto; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="tree-panel">
+    <h2>Слои и объекты</h2>
+    <div id="tree-root"><div id="empty-hint">Загрузка модели…</div></div>
+  </div>
+  <div id="viewport-wrap">
+    <div id="error-banner"></div>
+    <div id="status"></div>
+    <canvas id="viewport"></canvas>
+  </div>
+  <div id="props-panel">
+    <h2>Свойства</h2>
+    <div id="props-body"><div id="empty-hint">Кликните объект в дереве или в 3D-сцене.</div></div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js",
+    "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js",
+    "three/addons/loaders/GLTFLoader.js": "./vendor/GLTFLoader.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const params = new URLSearchParams(window.location.search);
+const modelUrl = params.get("model");
+const statusEl = document.getElementById("status");
+const errorEl = document.getElementById("error-banner");
+const treeRootEl = document.getElementById("tree-root");
+const propsBodyEl = document.getElementById("props-body");
+
+function showError(message) {
+  errorEl.textContent = message;
+  errorEl.style.display = "block";
+}
+
+if (!modelUrl) {
+  showError("Не указан параметр ?model=<ссылка на .glb> — открыть модель нечем.");
+  treeRootEl.innerHTML = "";
+}
+
+const canvas = document.getElementById("viewport");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14161a);
+
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100000);
+camera.position.set(80, 80, 120);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+sun.position.set(200, 300, 150);
+scene.add(sun);
+scene.add(new THREE.GridHelper(2000, 40, 0x444a55, 0x2a2e35));
+
+let selectedObject = null;
+const selectionOutline = new THREE.Box3Helper(new THREE.Box3(), 0xffcc33);
+selectionOutline.visible = false;
+scene.add(selectionOutline);
+
+function resize() {
+  const { clientWidth, clientHeight } = canvas.parentElement;
+  renderer.setSize(clientWidth, clientHeight, false);
+  camera.aspect = clientWidth / Math.max(clientHeight, 1);
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(canvas.parentElement);
+resize();
+
+function animate() {
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+
+function frameCameraOnObject(object3d) {
+  const box = new THREE.Box3().setFromObject(object3d);
+  if (box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z, 1) * 0.7;
+  camera.position.copy(center).add(new THREE.Vector3(radius, radius * 0.8, radius));
+  controls.target.copy(center);
+  camera.near = Math.max(radius / 1000, 0.01);
+  camera.far = radius * 100;
+  camera.updateProjectionMatrix();
+}
+
+function formatValue(value) {
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  return String(value);
+}
+
+function renderProperties(object3d) {
+  const data = object3d.userData || {};
+  if (!data.globalId) {
+    propsBodyEl.innerHTML = '<div id="empty-hint">У объекта нет IFC-свойств.</div>';
+    return;
+  }
+  let html = "<table><tbody>";
+  html += `<tr><td class="k">Имя</td><td>${object3d.name || ""}</td></tr>`;
+  html += `<tr><td class="k">Класс IFC</td><td>${data.ifcClass || ""}</td></tr>`;
+  html += `<tr><td class="k">GlobalId</td><td>${data.globalId || ""}</td></tr>`;
+  html += "</tbody></table>";
+  const psets = data.psets || {};
+  for (const [psetName, props] of Object.entries(psets)) {
+    html += `<div class="pset-name">${psetName}</div><table><tbody>`;
+    for (const [key, value] of Object.entries(props)) {
+      html += `<tr><td class="k">${key}</td><td>${formatValue(value)}</td></tr>`;
+    }
+    html += "</tbody></table>";
+  }
+  propsBodyEl.innerHTML = html;
+}
+
+function selectObject(object3d, treeItemEl) {
+  selectedObject = object3d;
+  document.querySelectorAll("#tree-root li.selected").forEach((el) => el.classList.remove("selected"));
+  if (treeItemEl) treeItemEl.classList.add("selected");
+  const box = new THREE.Box3().setFromObject(object3d);
+  if (!box.isEmpty()) {
+    selectionOutline.box.copy(box);
+    selectionOutline.visible = true;
+  }
+  renderProperties(object3d);
+}
+
+function buildTree(rootNode) {
+  treeRootEl.innerHTML = "";
+  for (const category of rootNode.children) {
+    const layerDiv = document.createElement("div");
+    layerDiv.className = "layer";
+
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    checkbox.addEventListener("change", () => { category.visible = checkbox.checked; });
+    label.appendChild(checkbox);
+    label.append(` ${category.name} (${category.children.length})`);
+    layerDiv.appendChild(label);
+
+    const ul = document.createElement("ul");
+    for (const leaf of category.children) {
+      const li = document.createElement("li");
+      li.textContent = leaf.name || "(без имени)";
+      li.addEventListener("click", () => {
+        selectObject(leaf, li);
+        frameCameraOnObject(leaf);
+      });
+      ul.appendChild(li);
+    }
+    layerDiv.appendChild(ul);
+    treeRootEl.appendChild(layerDiv);
+  }
+  if (!rootNode.children.length) {
+    treeRootEl.innerHTML = '<div id="empty-hint">Модель пуста.</div>';
+  }
+}
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let modelRoot = null;
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (!modelRoot) return;
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(modelRoot.children, true);
+  if (hits.length > 0) {
+    let hit = hits[0].object;
+    while (hit.parent && hit.parent !== modelRoot && !hit.userData.globalId) hit = hit.parent;
+    const li = Array.from(document.querySelectorAll("#tree-root li")).find((el) => el.textContent === hit.name);
+    selectObject(hit, li);
+  }
+});
+
+if (modelUrl) {
+  const startedAt = performance.now();
+  statusEl.textContent = "Загрузка…";
+  new GLTFLoader().load(
+    modelUrl,
+    (gltf) => {
+      // GLB не несёт нормалей (Шаг 1.9): считаем их здесь, а не на сервере —
+      // дешевле и не дублирует расчёт для каждой схемы IFC.
+      gltf.scene.traverse((obj) => {
+        if (obj.isMesh) obj.geometry.computeVertexNormals();
+      });
+      modelRoot = gltf.scene.children[0] || gltf.scene;
+      scene.add(gltf.scene);
+      buildTree(modelRoot);
+      frameCameraOnObject(modelRoot);
+      const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+      statusEl.textContent = `Загружено за ${seconds} с`;
+    },
+    undefined,
+    (error) => {
+      showError("Не удалось загрузить модель: " + (error && error.message ? error.message : error));
+      statusEl.textContent = "";
+    }
+  );
+}
+</script>
+</body>
+</html>

@@ -1,9 +1,8 @@
 """Реализация шагов пайплайна задачи (Шаг 1.3).
 
-`select_osm`, `prepare_relief`, `select_and_normalize` и `assemble_ifc` —
-реальные шаги, использующие уже реализованные Шаги 1.1, 1.2, 1.4-1.8. Веб-
-конвертация (IFC -> GLB, Шаг 1.9) сюда пока не входит: `DEFAULT_PIPELINE`
-расширится вместе с её реализацией.
+`select_osm`, `prepare_relief`, `select_and_normalize`, `assemble_ifc` и
+`convert_to_glb` — реальные шаги, использующие уже реализованные Шаги
+1.1, 1.2, 1.4-1.9.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import ifcopenshell
 import numpy as np
 from affine import Affine
 
@@ -26,6 +26,7 @@ from topology_geo.ifc.assemble import BasePoint, SiteModel, build_site_ifc
 from topology_geo.ifc.generate_test_ifc import validate_model
 from topology_geo.ifc.registry import ensure_schema as ensure_ifc_registry_schema
 from topology_geo.ifc.registry import register_global_ids
+from topology_geo.ifc.to_glb import convert_ifc_to_glb
 from topology_geo.jobs import store
 from topology_geo.osm.queries import count_within_radius
 from topology_geo.relief.cog import to_cog
@@ -218,11 +219,26 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     }
 
 
+def convert_to_glb(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
+    """Шаг 1.9, п. 1: IFC -> GLB для веб-просмотра. Источник — уже собранный
+    `site_ifc4x3.ifc` (Шаг 1.8, схема с нативными классами) из хранилища, не
+    пересборка из геометрии заново — GLB остаётся производным от IFC."""
+    ifc_key = f"jobs/{job.id}/site_ifc4x3.ifc"
+    ifc_text = storage.download(ifc_key).decode("utf-8")
+    model = ifcopenshell.file.from_string(ifc_text)
+
+    glb_bytes = convert_ifc_to_glb(model)
+    key = f"jobs/{job.id}/site.glb"
+    storage.upload(key, glb_bytes, content_type="model/gltf-binary")
+    return {"storage_key": key, "size_bytes": len(glb_bytes)}
+
+
 DEFAULT_PIPELINE: dict[str, Any] = {
     "select_osm": select_osm,
     "prepare_relief": prepare_relief,
     "select_and_normalize": select_and_normalize,
     "assemble_ifc": assemble_ifc,
+    "convert_to_glb": convert_to_glb,
 }
 
 DEFAULT_STEP_NAMES: list[str] = list(DEFAULT_PIPELINE)

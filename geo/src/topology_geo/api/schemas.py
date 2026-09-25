@@ -68,6 +68,8 @@ class JobOut(BaseModel):
 class FileOut(BaseModel):
     step_name: str
     storage_key: str
+    download_url: str
+    viewer_url: str | None = None
 
 
 class FilesResponse(BaseModel):

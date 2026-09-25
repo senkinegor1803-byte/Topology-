@@ -20,8 +20,9 @@ geo/            Python-пакет конвейера геоданных (PostGIS
   scripts/         обёртки импорта/обновления OSM
   src/topology_geo/
     coords.py       пересчёт координат и высот (МСК-59, EGM96 -> Балтийская)
-    ifc/             генерация, сборка (site.ifc) и валидация IFC, реестр GlobalId
+    ifc/             генерация, сборка (site.ifc), IFC -> GLB, валидация, реестр GlobalId
     geometry/        здания/дороги/вода/рельсы/деревья участка (Шаги 1.6-1.7)
+    web/viewer/      статическая страница-вьюер (three.js, Шаг 1.9)
     osm/             импорт, журнал источников, запросы, аудит полноты OSM
     relief/          репроекция, высоты, COG, слияние, покрытие, get_dem, TIN участка
     selection/       выборка, обрезка, нормализация, GeoPackage (Шаг 1.4)
@@ -64,9 +65,10 @@ celery -A topology_geo.tasks.celery_app worker --loglevel=info  # воркер
 Выборка и нормализация данных участка (Шаг 1.4) — см.
 [docs/selection.md](docs/selection.md).
 
-Интеграционные тесты Шагов 1.1-1.8 требуют системный `osm2pgsql`
-(`apt-get install osm2pgsql`) и доступные Postgres+PostGIS и Redis — без них
-соответствующие тесты пропускаются, но реально прогоняются в CI.
+Интеграционные тесты Шагов 1.1-1.9 требуют системный `osm2pgsql`
+(`apt-get install osm2pgsql`), доступные Postgres+PostGIS и Redis, и Chromium
+для теста вьюера (`playwright install chromium`) — без них соответствующие
+тесты пропускаются, но реально прогоняются в CI.
 
 ## Роли и участие AI
 
