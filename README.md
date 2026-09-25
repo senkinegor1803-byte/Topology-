@@ -63,9 +63,11 @@ celery -A topology_geo.tasks.celery_app worker --loglevel=info  # воркер
 ```
 
 Выборка и нормализация данных участка (Шаг 1.4) — см.
-[docs/selection.md](docs/selection.md).
+[docs/selection.md](docs/selection.md). Протокол приёмки Этапа 1 (Шаг 1.10,
+сквозной тест на 3 профилях участка) — см.
+[docs/stage1-acceptance.md](docs/stage1-acceptance.md).
 
-Интеграционные тесты Шагов 1.1-1.9 требуют системный `osm2pgsql`
+Интеграционные тесты Шагов 1.1-1.10 требуют системный `osm2pgsql`
 (`apt-get install osm2pgsql`), доступные Postgres+PostGIS и Redis, и Chromium
 для теста вьюера (`playwright install chromium`) — без них соответствующие
 тесты пропускаются, но реально прогоняются в CI.
