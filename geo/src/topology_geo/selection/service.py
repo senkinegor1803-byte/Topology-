@@ -35,6 +35,11 @@ class SiteFeature:
     geometry: Any  # shapely, локальные координаты участка (центр = (0,0))
     attributes: dict[str, Any]
     confidence: dict[str, str]
+    # Исходные теги OSM — не всё нужное нормализует Шаг 1.4 (он приводит
+    # только тип/этажность/покрытие/напряжение, дословно из плана); более
+    # поздним шагам (1.6 — height, 1.7 — waterway/railway и т.д.) нужен доступ
+    # к остальным тегам без повторного похода в PostGIS.
+    raw_tags: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,7 @@ def select_site_data(
                 geometry=local_geom,
                 attributes=attributes,
                 confidence=confidence,
+                raw_tags=raw.tags,
             )
         )
 
