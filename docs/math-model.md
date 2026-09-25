@@ -5,6 +5,33 @@
 каждого раздела — реализовано (со ссылкой на код и тесты) или заготовка
 (формула из плана, код ещё не написан).
 
+## Карта разделов
+
+```mermaid
+flowchart LR
+    subgraph Реализовано
+        C1["§1 Координаты/высоты<br/>coords.py"]:::done
+        R1["§2.4 Сшивка рельефа<br/>relief/merge.py"]:::done
+        Q1["§2.1 Буфер выборки<br/>osm/queries.py (уже применяется)"]:::done
+    end
+    subgraph Заготовка
+        T1["§2.2 Кольца LOD"]:::todo
+        T2["§2.3 Тайлы"]:::todo
+        T3["§2.4 Адаптивный TIN"]:::todo
+        T4["§2.5 Высота зданий"]:::todo
+        T5["§2.6 Огибающая застройки"]:::todo
+    end
+
+    C1 --> R1
+    C1 --> Q1
+    Q1 -.Шаг 1.4.-> T3
+    T3 --> T4
+    T1 --> T2
+
+    classDef done fill:#bbf7d0,stroke:#15803d,color:#111;
+    classDef todo fill:#e5e7eb,stroke:#6b7280,color:#111;
+```
+
 ## 1. Системы координат и высот (Шаг 0.4) — реализовано
 
 Код: `geo/src/topology_geo/coords.py`. Тесты: `geo/tests/test_coords.py`.
