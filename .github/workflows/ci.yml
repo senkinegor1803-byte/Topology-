@@ -8,12 +8,37 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: topology
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Шаг 1.1: интеграционные тесты osm2pgsql (geo/tests/test_osm_import_style.py)
+      # создают/удаляют свои временные БД на этом сервисе и требуют
+      # суперпользователя (CREATE EXTENSION postgis) — как в официальном образе.
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install osm2pgsql
+        run: sudo apt-get update && sudo apt-get install -y osm2pgsql
 
       - name: Install geo package (dev)
         working-directory: geo

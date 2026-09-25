@@ -15,11 +15,14 @@
 
 ```
 geo/            Python-пакет конвейера геоданных (PostGIS, IFC, OSM, рельеф)
+  osm2pgsql/style.lua  флекс-стиль импорта OSM (Шаг 1.1)
+  sql/             SQL-миграции (служебные таблицы)
+  scripts/         обёртки импорта/обновления OSM
   src/topology_geo/
     coords.py       пересчёт координат и высот (МСК-59, EGM96 -> Балтийская)
     ifc/             генерация и валидация IFC
-    osm/             импорт и аудит полноты OSM
-  tests/            модульные тесты (pytest)
+    osm/             импорт, журнал источников, запросы, аудит полноты OSM
+  tests/            модульные и интеграционные тесты (pytest)
 infra/          Docker Compose для локальной разработки (PostGIS, MinIO, Redis)
 docs/           план, словарь данных, системы координат, прочая документация
 schemas/        JSON-схемы (meta.json и др.)
@@ -39,6 +42,12 @@ cd geo
 pip install -e ".[dev]"
 pytest
 ```
+
+Импорт OSM в PostGIS (Шаг 1.1) — см. [docs/osm-import.md](docs/osm-import.md)
+(`geo/scripts/import_osm.sh`, флекс-стиль `geo/osm2pgsql/style.lua`).
+Интеграционные тесты импорта требуют системный `osm2pgsql` (`apt-get install
+osm2pgsql`) и доступный Postgres+PostGIS — без них соответствующие тесты
+пропускаются, но реально прогоняются в CI.
 
 ## Роли и участие AI
 
