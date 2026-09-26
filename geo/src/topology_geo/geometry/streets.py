@@ -26,6 +26,7 @@ from pathlib import Path
 
 from shapely.geometry import Point, shape
 from shapely.geometry.polygon import Polygon
+from shapely.validation import make_valid
 
 from topology_geo.coords import msk59_to_wgs84, transform_geometry_to_msk59, wgs84_to_msk59
 from topology_geo.osm.raw_roads import RawRoadWay, build_osm_xml
@@ -71,6 +72,26 @@ class IntersectionArea:
     polygon: Polygon
 
 
+@dataclass(frozen=True)
+class LaneMarking:
+    """Полигон элемента разметки (Шаг 2.3, п. 3: `toLaneMarkingsGeojson` —
+    центральные линии, стрелки поворота из `turn:lanes`) в локальных
+    координатах. Без ширины/направления — osm2streets отдаёт только тип и
+    саму форму (полигон уже описывает штрих/стрелку целиком)."""
+
+    kind: str  # "center line" | "lane arrow" (значения osm2streets)
+    polygon: Polygon
+
+
+@dataclass(frozen=True)
+class StreetNetwork:
+    """Результат `build_lane_network` (Шаг 2.3, п. 1 и 3)."""
+
+    lanes: list[LaneRibbon]
+    intersections: list[IntersectionArea]
+    markings: list[LaneMarking]
+
+
 def is_osm2streets_available() -> bool:
     """Есть ли в окружении `node` и установленный `osm2streets-js`
     (`npm install` в `geo/osm2streets/`). Используется и тестами (пропуск при
@@ -103,9 +124,35 @@ def _circle_geojson_wgs84(center_lon: float, center_lat: float, radius_m: float,
 def _as_polygons(geom):
     if geom.is_empty:
         return []
-    if geom.geom_type.startswith("Multi"):
+    if geom.geom_type.startswith("Multi") or geom.geom_type == "GeometryCollection":
         return [g for g in geom.geoms if not g.is_empty and g.geom_type == "Polygon"]
     return [geom] if geom.geom_type == "Polygon" else []
+
+
+def _localize_features(features: list[dict], zone: int, center_x: float, center_y: float, radius_m: float):
+    """GeoJSON-фичи (WGS-84) -> список (полигон в локальных координатах,
+    исходные properties) - общий шаг репроекции+обрезки для полос/
+    перекрёстков/разметки (та же цепочка, что остальные слои, Шаг 1.4).
+
+    `make_valid` перед пересечением с кругом обязателен: у osm2streets
+    среди тысяч мелких полигонов разметки (штрихи центральной линии,
+    стрелки) на реальных данных попадаются самопересекающиеся "бабочки"
+    околонулевой площади (та же природа проблемы, что `repair_footprint`
+    у контуров зданий, Шаг 1.6) - без починки `shapely` падает с
+    `TopologyException` на пересечении с кругом буфера."""
+    result: list[tuple[Polygon, dict]] = []
+    for feature in features:
+        geom_wgs84 = make_valid(shape(feature["geometry"]))
+        if geom_wgs84.is_empty:
+            continue
+        geom_msk59 = transform_geometry_to_msk59(geom_wgs84, zone=zone)
+        local_geom = clip_and_localize(geom_msk59, center_x, center_y, radius_m)
+        if local_geom is None:
+            continue
+        props = feature.get("properties", {})
+        for polygon in _as_polygons(local_geom):
+            result.append((polygon, props))
+    return result
 
 
 def _run_osm2streets(osm_xml: str, clip_geojson: str, import_options: dict[str, object]) -> dict:
@@ -135,15 +182,16 @@ def build_lane_network(
     zone: int,
     *,
     import_options: dict[str, object] | None = None,
-) -> tuple[list[LaneRibbon], list[IntersectionArea]]:
-    """Построить полосы и площадки перекрёстков (Шаг 2.3, п. 1) из `raw_roads`
-    (с сохранённой связностью узлов, `osm.raw_roads.fetch_raw_roads_in_buffer`).
+) -> StreetNetwork:
+    """Построить полосы, площадки перекрёстков и разметку (Шаг 2.3, п. 1 и 3)
+    из `raw_roads` (с сохранённой связностью узлов,
+    `osm.raw_roads.fetch_raw_roads_in_buffer`).
 
-    Возвращает пустые списки, если дорог нет вовсе (osm2streets ожидает
-    непустую дорожную сеть, пустой набор — не ошибка, а факт отсутствия дорог
-    в буфере)."""
+    Возвращает пустой `StreetNetwork`, если дорог нет вовсе (osm2streets
+    ожидает непустую дорожную сеть, пустой набор — не ошибка, а факт
+    отсутствия дорог в буфере)."""
     if not raw_roads:
-        return [], []
+        return StreetNetwork(lanes=[], intersections=[], markings=[])
 
     osm_xml = build_osm_xml(raw_roads)
     clip_geojson = _circle_geojson_wgs84(center_lon, center_lat, radius_m, zone)
@@ -151,34 +199,31 @@ def build_lane_network(
 
     center_x, center_y, _ = wgs84_to_msk59(center_lon, center_lat, zone=zone)
 
-    lanes: list[LaneRibbon] = []
-    for feature in result.get("lanes", {}).get("features", []):
-        geom_wgs84 = shape(feature["geometry"])
-        geom_msk59 = transform_geometry_to_msk59(geom_wgs84, zone=zone)
-        local_geom = clip_and_localize(geom_msk59, center_x, center_y, radius_m)
-        if local_geom is None:
-            continue
-        props = feature.get("properties", {})
-        for polygon in _as_polygons(local_geom):
-            lanes.append(
-                LaneRibbon(
-                    osm_way_ids=tuple(props.get("osm_way_ids", [])),
-                    lane_type=str(props.get("type", "")),
-                    width_m=float(props.get("width", 0.0)),
-                    direction=str(props.get("direction", "")),
-                    polygon=polygon,
-                )
-            )
+    lanes = [
+        LaneRibbon(
+            osm_way_ids=tuple(props.get("osm_way_ids", [])),
+            lane_type=str(props.get("type", "")),
+            width_m=float(props.get("width", 0.0)),
+            direction=str(props.get("direction", "")),
+            polygon=polygon,
+        )
+        for polygon, props in _localize_features(
+            result.get("lanes", {}).get("features", []), zone, center_x, center_y, radius_m
+        )
+    ]
 
-    intersections: list[IntersectionArea] = []
-    for feature in result.get("intersections", {}).get("features", []):
-        geom_wgs84 = shape(feature["geometry"])
-        geom_msk59 = transform_geometry_to_msk59(geom_wgs84, zone=zone)
-        local_geom = clip_and_localize(geom_msk59, center_x, center_y, radius_m)
-        if local_geom is None:
-            continue
-        props = feature.get("properties", {})
-        for polygon in _as_polygons(local_geom):
-            intersections.append(IntersectionArea(kind=str(props.get("type", "")), polygon=polygon))
+    intersections = [
+        IntersectionArea(kind=str(props.get("type", "")), polygon=polygon)
+        for polygon, props in _localize_features(
+            result.get("intersections", {}).get("features", []), zone, center_x, center_y, radius_m
+        )
+    ]
 
-    return lanes, intersections
+    markings = [
+        LaneMarking(kind=str(props.get("type", "")), polygon=polygon)
+        for polygon, props in _localize_features(
+            result.get("markings", {}).get("features", []), zone, center_x, center_y, radius_m
+        )
+    ]
+
+    return StreetNetwork(lanes=lanes, intersections=intersections, markings=markings)

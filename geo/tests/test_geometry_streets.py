@@ -12,6 +12,7 @@ from shapely.geometry import LineString
 from topology_geo.geometry.streets import (
     OSM2STREETS_DIR,
     IntersectionArea,
+    LaneMarking,
     LaneRibbon,
     build_lane_network,
     is_osm2streets_available,
@@ -50,13 +51,14 @@ def _crossroads() -> list[RawRoadWay]:
 
 
 def test_empty_input_returns_empty_lists():
-    lanes, intersections = build_lane_network([], CENTER_LON, CENTER_LAT, 500.0, ZONE)
-    assert lanes == []
-    assert intersections == []
+    network = build_lane_network([], CENTER_LON, CENTER_LAT, 500.0, ZONE)
+    assert network.lanes == []
+    assert network.intersections == []
+    assert network.markings == []
 
 
 def test_crossroads_produces_driving_and_sidewalk_lanes_per_road():
-    lanes, intersections = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE)
+    lanes = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE).lanes
 
     assert len(lanes) == 16  # 4 дороги x (2 проезжие полосы + 2 тротуара)
     assert all(isinstance(lane, LaneRibbon) for lane in lanes)
@@ -77,7 +79,7 @@ def test_crossroads_produces_driving_and_sidewalk_lanes_per_road():
 
 
 def test_lane_polygons_are_valid_with_positive_area():
-    lanes, _ = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE)
+    lanes = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE).lanes
     for lane in lanes:
         assert lane.polygon.is_valid
         assert lane.polygon.area > 0
@@ -87,7 +89,7 @@ def test_lane_polygons_are_in_local_coordinates_near_origin():
     """Центр перекрёстка (узел 1) совпадает с центром буфера -> все полосы
     должны оказаться близко к (0, 0) в локальных координатах участка, а не
     где-то в районе исходных WGS-84 градусов или метров МСК-59."""
-    lanes, _ = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE)
+    lanes = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE).lanes
     for lane in lanes:
         cx, cy = lane.polygon.centroid.x, lane.polygon.centroid.y
         assert abs(cx) < 500.0
@@ -95,7 +97,7 @@ def test_lane_polygons_are_in_local_coordinates_near_origin():
 
 
 def test_crossroads_produces_intersection_areas():
-    _, intersections = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE)
+    intersections = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE).intersections
     assert len(intersections) == 4
     assert all(isinstance(area, IntersectionArea) for area in intersections)
     assert all(area.polygon.is_valid and area.polygon.area > 0 for area in intersections)
@@ -108,9 +110,47 @@ def test_single_road_without_intersection_still_produces_lanes():
             node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
         ),
     ]
-    lanes, intersections = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE)
-    assert len(lanes) == 4  # 2 проезжие + 2 тротуара
-    assert intersections == []
+    network = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE)
+    assert len(network.lanes) == 4  # 2 проезжие + 2 тротуара
+    assert network.intersections == []
+
+
+# --- разметка (Шаг 2.3, п. 3) -------------------------------------------
+
+
+def test_crossroads_produces_center_line_and_arrow_markings():
+    markings = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE).markings
+    assert len(markings) > 0
+    assert all(isinstance(m, LaneMarking) for m in markings)
+    kinds = {m.kind for m in markings}
+    assert "center line" in kinds
+
+
+def test_marking_polygons_are_valid_with_positive_area():
+    markings = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE).markings
+    for marking in markings:
+        assert marking.polygon.is_valid
+        assert marking.polygon.area > 0
+
+
+def test_turn_lanes_tag_produces_lane_arrow_markings():
+    roads = [
+        RawRoadWay(
+            osm_id=10, tags={"highway": "residential", "lanes": "2", "turn:lanes": "left|right"},
+            node_ids=[1, 2], geometry=LineString([(56.2430, 58.0105), (56.2430, 58.0125)]),
+        ),
+        RawRoadWay(
+            osm_id=11, tags={"highway": "residential", "lanes": "2"},
+            node_ids=[1, 3], geometry=LineString([(56.2430, 58.0105), (56.2460, 58.0105)]),
+        ),
+        RawRoadWay(
+            osm_id=12, tags={"highway": "residential", "lanes": "2"},
+            node_ids=[1, 4], geometry=LineString([(56.2430, 58.0105), (56.2430, 58.0085)]),
+        ),
+    ]
+    markings = build_lane_network(roads, CENTER_LON, CENTER_LAT, 500.0, ZONE).markings
+    kinds = {m.kind for m in markings}
+    assert "lane arrow" in kinds
 
 
 def test_node_available_check_matches_shutil():

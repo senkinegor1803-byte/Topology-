@@ -20,7 +20,7 @@ from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
 from topology_geo.geometry.rail import build_rail_ribbons
 from topology_geo.geometry.roads import build_road_ribbons
-from topology_geo.geometry.streets import IntersectionArea, LaneRibbon, build_lane_network, is_osm2streets_available
+from topology_geo.geometry.streets import StreetNetwork, build_lane_network, is_osm2streets_available
 from topology_geo.geometry.vegetation import build_individual_trees, scatter_forest_trees
 from topology_geo.geometry.water import build_water_areas, build_waterway_ribbons
 from topology_geo.ifc.assemble import BasePoint, SiteModel, build_site_ifc
@@ -175,20 +175,19 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     rail = build_rail_ribbons(dataset.features)
     trees = build_individual_trees(dataset.features) + scatter_forest_trees(dataset.features)
 
-    # Полосы через osm2streets (Шаг 2.3, п. 1) - честный водопад: если
+    # Полосы через osm2streets (Шаг 2.3, п. 1 и 3) - честный водопад: если
     # инструмента нет в окружении (см. `is_osm2streets_available`), участок
     # остаётся с одной лентой на дорогу (Шаг 1.7, `roads` выше), не падает -
     # тот же приём, что `NullOvertureSource` для водопада высоты (Шаг 2.2).
-    lanes: list[LaneRibbon] = []
-    intersections: list[IntersectionArea] = []
+    street_network = StreetNetwork(lanes=[], intersections=[], markings=[])
     if is_osm2streets_available():
         raw_roads = fetch_raw_roads_in_buffer(conn, job.center_lon, job.center_lat, job.radius_m)
-        lanes, intersections = build_lane_network(raw_roads, job.center_lon, job.center_lat, job.radius_m, zone)
+        street_network = build_lane_network(raw_roads, job.center_lon, job.center_lat, job.radius_m, zone)
 
     site_model = SiteModel(
         tin=tin, buildings=buildings, roads=roads,
         water_areas=water_areas, waterways=waterways, rail=rail, trees=trees,
-        lanes=lanes, intersections=intersections,
+        lanes=street_network.lanes, intersections=street_network.intersections, markings=street_network.markings,
     )
     base_point = BasePoint(
         lon=job.center_lon, lat=job.center_lat, zone=zone, x=center_x, y=center_y,
@@ -218,8 +217,9 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         "waterways": len(waterways),
         "rail": len(rail),
         "trees": len(trees),
-        "lanes": len(lanes),
-        "intersections": len(intersections),
+        "lanes": len(street_network.lanes),
+        "intersections": len(street_network.intersections),
+        "markings": len(street_network.markings),
     }
 
 

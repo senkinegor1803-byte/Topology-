@@ -1,11 +1,12 @@
-// Обёртка над osm2streets-js (Шаг 2.3, п. 1): получить геометрию полос
-// (проезжая часть/тротуар/парковка/...) и перекрёстков из OSM XML с
-// сохранённой топологией узлов (см. topology_geo.osm.raw_roads.build_osm_xml
-// и docstring geo/src/topology_geo/geometry/streets.py).
+// Обёртка над osm2streets-js (Шаг 2.3, п. 1 и 3): получить геометрию полос
+// (проезжая часть/тротуар/парковка/...), перекрёстков и дорожной разметки
+// (центральные линии, стрелки поворота) из OSM XML с сохранённой топологией
+// узлов (см. topology_geo.osm.raw_roads.build_osm_xml и docstring
+// geo/src/topology_geo/geometry/streets.py).
 //
 // Запуск: node convert.mjs <osm.xml> <clip.geojson> <options.json>
-// Печатает в stdout один JSON-объект {lanes, intersections} (FeatureCollection
-// каждый) или {error: "..."} с ненулевым кодом выхода при сбое.
+// Печатает в stdout один JSON-объект {lanes, intersections, markings}
+// (FeatureCollection каждый) или {error: "..."} с ненулевым кодом выхода при сбое.
 
 import init, { JsStreetNetwork } from "osm2streets-js/osm2streets_js.js";
 import { readFileSync } from "node:fs";
@@ -44,6 +45,7 @@ async function main() {
   const result = {
     lanes: JSON.parse(network.toLanePolygonsGeojson()),
     intersections: JSON.parse(network.toIntersectionMarkingsGeojson()),
+    markings: JSON.parse(network.toLaneMarkingsGeojson()),
   };
   process.stdout.write(JSON.stringify(result));
 }

@@ -141,6 +141,7 @@ def test_crossroads_lanes_and_intersection_survive_full_pipeline_into_ifc(pg_tes
         assemble_step = next(s for s in job["steps"] if s["step_name"] == "assemble_ifc")
         assert assemble_step["result"]["lanes"] == 16  # 4 улицы x (2 проезжие + 2 тротуара)
         assert assemble_step["result"]["intersections"] == 4
+        assert assemble_step["result"]["markings"] > 0
 
         files = client.get(f"/models/{job_id}/files").json()["files"]
         ifc_file = next(f for f in files if f["step_name"] == "assemble_ifc:IFC4X3")
@@ -166,3 +167,7 @@ def test_crossroads_lanes_and_intersection_survive_full_pipeline_into_ifc(pg_tes
             e for e in model.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Перекрёсток")
         ]
         assert len(intersections) == 4
+
+        markings = [e for e in model.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Разметка")]
+        assert len(markings) > 0  # один продукт на вид разметки, не на штрих
+        assert {_psets(m)["Pset_Разметка"]["Тип"] for m in markings} <= {"center line", "lane arrow"}

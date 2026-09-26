@@ -13,7 +13,7 @@ from shapely.geometry import LineString, Polygon
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
 from topology_geo.geometry.rail import RailRibbon
 from topology_geo.geometry.roads import RoadRibbon
-from topology_geo.geometry.streets import IntersectionArea, LaneRibbon
+from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRibbon
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.ifc.assemble import (
@@ -277,6 +277,47 @@ def test_build_site_ifc_intersection_has_no_registry_entry():
     intersection = IntersectionArea(kind="sidewalk corner", polygon=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]))
     _, registry = build_site_ifc("IFC4", SiteModel(intersections=[intersection]), BASE_POINT)
     assert registry == []  # нет естественного osm_id - как и у TIN/рельефа
+
+
+def test_build_site_ifc_merges_markings_of_same_kind_into_one_product():
+    markings = [
+        LaneMarking(kind="center line", polygon=Polygon([(0, 0), (1, 0), (1, 0.1), (0, 0.1)])),
+        LaneMarking(kind="center line", polygon=Polygon([(2, 0), (3, 0), (3, 0.1), (2, 0.1)])),
+        LaneMarking(kind="lane arrow", polygon=Polygon([(0, 5), (1, 5), (1, 6), (0.5, 6.5), (0, 6)])),
+    ]
+    f, registry = build_site_ifc("IFC4", SiteModel(markings=markings), BASE_POINT)
+    assert validate_model(f) == []
+
+    marking_products = [e for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Разметка")]
+    assert len(marking_products) == 2  # один продукт на вид, не на штрих
+
+    center_line_psets = _psets_of_proxy_by_name(f, "Разметка (center line)")
+    assert center_line_psets["Pset_Разметка"] == {"Тип": "center line", "Элементов": 2}
+
+    arrow_psets = _psets_of_proxy_by_name(f, "Разметка (lane arrow)")
+    assert arrow_psets["Pset_Разметка"] == {"Тип": "lane arrow", "Элементов": 1}
+
+    assert registry == []  # без естественного osm_id
+
+
+def test_build_site_ifc_merged_marking_mesh_covers_all_pieces_area():
+    # два непересекающихся штриха разной формы (разное число вершин) - ровно
+    # случай, из-за которого понадобилось слияние в один меш вручную
+    # (add_mesh_representation не принимает разноразмерные items в одном продукте).
+    piece_a = Polygon([(0, 0), (1, 0), (1, 0.1), (0, 0.1)])
+    piece_b = Polygon([(10, 10), (11, 10), (11, 11), (10.5, 11.5), (10, 11)])
+    markings = [LaneMarking(kind="center line", polygon=piece_a), LaneMarking(kind="center line", polygon=piece_b)]
+
+    f, _ = build_site_ifc("IFC4", SiteModel(markings=markings), BASE_POINT)
+    assert validate_model(f) == []
+
+    product = next(e for e in f.by_type("IfcBuildingElementProxy") if e.Name == "Разметка (center line)")
+    rep_item = product.Representation.Representations[0].Items[0]
+    assert rep_item.is_a("IfcPolygonalFaceSet")
+    # 2 треугольника на прямоугольник + 3 на пятиугольник = 5 (earcut даёт
+    # ровно n-2 треугольников на выпуклый n-угольник без отверстий) - оба
+    # куска в ОДНОМ представлении (не по одному продукту на штрих).
+    assert len(rep_item.Faces) == 2 + 3
 
 
 def test_build_site_ifc_uses_native_ifcroad_in_ifc43():

@@ -41,7 +41,7 @@ from topology_geo.geometry.roofs import (
     build_pitched_building_mesh,
     oriented_bounding_box,
 )
-from topology_geo.geometry.streets import IntersectionArea, LaneRibbon
+from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRibbon
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.relief.tin import SiteTin
@@ -66,6 +66,7 @@ class SiteModel:
     trees: list[TreePoint] = field(default_factory=list)
     lanes: list[LaneRibbon] = field(default_factory=list)
     intersections: list[IntersectionArea] = field(default_factory=list)
+    markings: list[LaneMarking] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,24 @@ def flat_polygon_mesh(polygon, elevation_fn: ElevationFn, *, default_z: float = 
     flat_vertices, triangles = triangulate_polygon(polygon)
     vertices = [(x, y, elevation_fn(x, y) or default_z) for x, y in flat_vertices]
     return vertices, [tuple(t) for t in triangles]
+
+
+def _combine_meshes(meshes: list[tuple[list[Vertex], list[Face]]]) -> tuple[list[Vertex], list[Face]]:
+    """Слить несколько независимых мешей в один (вершины подряд, грани со
+    сдвигом индексов) - один продукт IFC вместо одного на каждый элемент.
+    Нужно для разметки (Шаг 2.3, п. 3): у одного перекрёстка её сотни мелких
+    штрихов/стрелок одного вида, `ifcopenshell.api.geometry.add_mesh_representation`
+    не поддерживает несколько представлений с разным числом вершин в одном
+    продукте (`numpy.array` требует прямоугольную форму) - проще и надёжнее
+    склеить геометрию заранее, чем упираться в это ограничение."""
+    vertices: list[Vertex] = []
+    faces: list[Face] = []
+    offset = 0
+    for verts, tris in meshes:
+        vertices.extend(verts)
+        faces.extend(tuple(i + offset for i in tri) for tri in tris)
+        offset += len(verts)
+    return vertices, faces
 
 
 def extrude_polygon_mesh(polygon, base_z: float, top_z: float) -> tuple[list[Vertex], list[Face]]:
@@ -366,6 +385,28 @@ def build_site_ifc(
         products.append(product)
         # не из одного OSM-объекта (перекрёсток собран из нескольких way) -
         # нет естественного osm_id, в реестр не попадает (как и рельеф/TIN выше).
+
+    # Один продукт НА ВИД разметки (не на штрих/стрелку) - их у одного
+    # перекрёстка могут быть сотни (дискретные отрезки центральной линии),
+    # склеены в один меш (`_combine_meshes`), иначе site.ifc распухает от
+    # тысяч тривиальных объектов на честный участок 3 км.
+    markings_by_kind: dict[str, list[LaneMarking]] = {}
+    for marking in site_model.markings:
+        markings_by_kind.setdefault(marking.kind, []).append(marking)
+    for kind, markings in markings_by_kind.items():
+        mesh = _combine_meshes([flat_polygon_mesh(m.polygon, _terrain_elevation) for m in markings])
+        product = _add_mesh_product(
+            f, body_context, "IfcBuildingElementProxy", f"Разметка ({kind})", "USERDEFINED",
+            mesh,
+            {
+                "Pset_Разметка": {"Тип": kind, "Элементов": len(markings)},
+                "Pset_Контекст": {"Источник": "osm2streets (Шаг 2.3, п. 3)"},
+            },
+        )
+        products.append(product)
+        # без естественного osm_id (штрих/стрелка не привязаны к одному way,
+        # да и склеены по несколько в один продукт) - не попадает в реестр,
+        # как перекрёстки выше.
 
     for water in site_model.water_areas:
         mesh = flat_polygon_mesh(water.polygon, lambda x, y, z=water.level_z: z)
