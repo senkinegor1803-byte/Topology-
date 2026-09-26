@@ -30,7 +30,7 @@ from topology_geo.ifc.to_glb import convert_ifc_to_glb
 from topology_geo.jobs import store
 from topology_geo.osm.queries import count_within_radius
 from topology_geo.relief.cog import to_cog
-from topology_geo.relief.service import Grid, get_dem
+from topology_geo.relief.service import Grid, get_dem, read_relief_from_storage
 from topology_geo.relief.tin import build_site_tin
 from topology_geo.selection.geopackage import dataset_to_geopackage_bytes
 from topology_geo.selection.service import select_site_data
@@ -146,20 +146,6 @@ def select_and_normalize(conn: Any, storage: ObjectStorage, job: store.Job) -> d
     }
 
 
-def _read_relief_from_storage(storage: ObjectStorage, storage_key: str) -> tuple[np.ndarray, Grid]:
-    """Прочитать COG рельефа, сохранённый `prepare_relief`, обратно в массив
-    высот + `Grid` — не пересчитывать слияние заново (единственный источник
-    истины уже есть в хранилище)."""
-    from rasterio.io import MemoryFile
-
-    raw = storage.download(storage_key)
-    with MemoryFile(raw) as memfile, memfile.open() as src:
-        values = src.read(1)
-        crs = src.crs.to_proj4() if src.crs else ""
-        grid = Grid(transform=src.transform, width=src.width, height=src.height, crs=crs)
-    return values, grid
-
-
 def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     """Шаги 4-5 (Шаги 1.5-1.8): TIN участка, здания/дороги/вода/рельсы/деревья
     и сборка `site.ifc` в обеих схемах (IFC4, IFC4X3), с реестром GlobalId в
@@ -174,7 +160,7 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
             "нет данных OSM для этой области (проверьте, что выполнен импорт по Шагу 1.1)"
         ) from exc
 
-    relief_values, relief_grid = _read_relief_from_storage(storage, f"jobs/{job.id}/relief.tif")
+    relief_values, relief_grid = read_relief_from_storage(storage, f"jobs/{job.id}/relief.tif")
     tin = build_site_tin(relief_values, relief_grid, center_x, center_y, job.radius_m, dataset.features)
 
     buildings = extrude_buildings(dataset.features, tin.interpolate_z)

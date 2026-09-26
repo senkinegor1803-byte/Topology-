@@ -27,7 +27,8 @@ geo/            Python-пакет конвейера геоданных (PostGIS
     relief/          репроекция, высоты, COG, слияние, покрытие, get_dem, TIN участка
     selection/       выборка, обрезка, нормализация, GeoPackage (Шаг 1.4)
     jobs/            модель задач, движок пайплайна, реальные шаги (Шаг 1.3)
-    tasks/           очередь Celery + Redis (Шаг 1.3)
+    tiling/          кольца LOD, тайлы 250x250м, кеш, стыковка рельефа (Шаг 2.1)
+    tasks/           очередь Celery + Redis (Шаг 1.3), параллельная генерация тайлов (Шаг 2.1)
     api/             FastAPI: POST /jobs, GET /jobs/{id}, GET /models/{id}/files
     storage.py       объектное хранилище (MinIO/файловое/в памяти)
   tests/            модульные и интеграционные тесты (pytest)

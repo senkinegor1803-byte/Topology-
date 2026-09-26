@@ -112,3 +112,14 @@ def get_dem(
         coverage_mask = coverage_mask | valid
 
     return result, coverage_mask
+
+
+def read_relief_from_storage(storage: Storage, storage_key: str) -> tuple[np.ndarray, Grid]:
+    """Прочитать COG рельефа (например, сохранённый `jobs.steps.prepare_relief`
+    или тайловым генератором Этапа 2) обратно в массив высот + `Grid` — не
+    пересчитывать слияние источников заново, единственный источник истины уже
+    в хранилище."""
+    with MemoryFile(storage.download(storage_key)) as memfile, memfile.open() as src:
+        values = src.read(1)
+        crs = src.crs.to_proj4() if src.crs else ""
+        return values, Grid(transform=src.transform, width=src.width, height=src.height, crs=crs)

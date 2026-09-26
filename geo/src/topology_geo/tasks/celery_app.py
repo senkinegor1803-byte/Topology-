@@ -27,7 +27,7 @@ app = Celery(
     # без include воркер, запущенный как `celery -A topology_geo.tasks.celery_app`,
     # никогда не импортирует pipeline_tasks.py и не увидит задачу @app.task в нём
     # (регистрация задач привязана к импорту модуля, а не к самому объекту app).
-    include=["topology_geo.tasks.pipeline_tasks"],
+    include=["topology_geo.tasks.pipeline_tasks", "topology_geo.tasks.tile_tasks"],
 )
 app.conf.update(
     task_serializer="json",
