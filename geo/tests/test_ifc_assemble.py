@@ -10,7 +10,7 @@ import pytest
 from scipy.spatial import Delaunay
 from shapely.geometry import LineString, Polygon
 
-from topology_geo.geometry.buildings import BuildingSolid
+from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
 from topology_geo.geometry.rail import RailRibbon
 from topology_geo.geometry.roads import RoadRibbon
 from topology_geo.geometry.vegetation import TreePoint
@@ -175,6 +175,65 @@ def test_build_site_ifc_registers_one_global_id_per_source_object():
     assert len(set(global_ids)) == len(global_ids)  # уникальны
     all_global_ids_in_file = {p.GlobalId for p in f.by_type("IfcRoot")}
     assert set(global_ids) <= all_global_ids_in_file
+
+
+def _psets_of(model, name_predicate) -> dict:
+    element = next(e for e in model.by_type("IfcBuildingElementProxy") if name_predicate(e.Name or ""))
+    return {
+        rel.RelatingPropertyDefinition.Name: {
+            prop.Name: prop.NominalValue.wrappedValue for prop in rel.RelatingPropertyDefinition.HasProperties
+        }
+        for rel in element.IsDefinedBy
+        if rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
+    }
+
+
+def test_build_site_ifc_writes_entrance_properties_on_building():
+    building = BuildingSolid(
+        osm_id=1, footprint=Polygon([(-10, -10), (10, -10), (10, 10), (-10, 10)]),
+        height_m=12.0, height_confidence="факт", height_source="OSM", base_z=100.0, building_type="жилой",
+        entrances=(
+            EntranceInfo(entrance_type="main", x=0.0, y=-10.0),
+            EntranceInfo(entrance_type="yes", x=10.0, y=0.0),
+        ),
+    )
+    model = SiteModel(buildings=[building])
+    f, _ = build_site_ifc("IFC4", model, BASE_POINT)
+    assert validate_model(f) == []
+
+    psets = _psets_of(f, lambda name: name.startswith("Здание"))
+    building_pset = psets["Pset_Здание"]
+    assert building_pset["Входов_всего"] == 2
+    assert building_pset["Вход_1_Тип"] == "main"
+    assert building_pset["Вход_1_X_м"] == pytest.approx(0.0)
+    assert building_pset["Вход_1_Y_м"] == pytest.approx(-10.0)
+    assert building_pset["Вход_2_Тип"] == "yes"
+
+
+def test_build_site_ifc_building_without_entrances_has_no_entrance_properties():
+    f, _ = build_site_ifc("IFC4", _make_site_model(), BASE_POINT)
+    psets = _psets_of(f, lambda name: name.startswith("Здание"))
+    assert "Входов_всего" not in psets["Pset_Здание"]
+
+
+def test_build_site_ifc_marks_building_part_in_context_pset():
+    part = BuildingSolid(
+        osm_id=2, footprint=Polygon([(-10, -10), (10, -10), (10, 10), (-10, 10)]),
+        height_m=5.0, height_confidence="факт", height_source="OSM", base_z=100.0, building_type="roof",
+        source_layer=LAYER_BUILDING_PARTS, is_part=True,
+    )
+    f, registry = build_site_ifc("IFC4", SiteModel(buildings=[part]), BASE_POINT)
+    assert validate_model(f) == []
+
+    psets = _psets_of(f, lambda name: name.startswith("Здание"))
+    assert psets["Pset_Контекст"]["Часть_здания"] is True
+    assert registry == [(LAYER_BUILDING_PARTS, 2, f.by_type("IfcBuildingElementProxy")[0].GlobalId)]
+
+
+def test_build_site_ifc_plain_building_has_no_part_marker_in_context_pset():
+    f, _ = build_site_ifc("IFC4", _make_site_model(), BASE_POINT)
+    psets = _psets_of(f, lambda name: name.startswith("Здание"))
+    assert "Часть_здания" not in psets["Pset_Контекст"]
 
 
 def test_build_site_ifc_uses_native_ifcroad_in_ifc43():

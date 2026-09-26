@@ -67,6 +67,9 @@ SAMPLE_OSM_XML = """\
   <node id="52" lat="58.0002" lon="56.2002" version="1">
     <tag k="amenity" v="bench"/>
   </node>
+  <node id="53" lat="58.0011" lon="56.2011" version="1">
+    <tag k="entrance" v="main"/>
+  </node>
 
   <node id="60" lat="58.0060" lon="56.2000" version="1"/>
   <node id="61" lat="58.0060" lon="56.2020" version="1"/>
@@ -84,6 +87,11 @@ SAMPLE_OSM_XML = """\
   <node id="85" lat="58.0093" lon="56.2015" version="1"/>
   <node id="86" lat="58.0097" lon="56.2015" version="1"/>
   <node id="87" lat="58.0097" lon="56.2005" version="1"/>
+
+  <node id="90" lat="58.0110" lon="56.2000" version="1"/>
+  <node id="91" lat="58.0110" lon="56.2010" version="1"/>
+  <node id="92" lat="58.0120" lon="56.2010" version="1"/>
+  <node id="93" lat="58.0120" lon="56.2000" version="1"/>
 
   <way id="100" version="1">
     <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/>
@@ -122,6 +130,11 @@ SAMPLE_OSM_XML = """\
   </way>
   <way id="111" version="1">
     <nd ref="84"/><nd ref="85"/><nd ref="86"/><nd ref="87"/><nd ref="84"/>
+  </way>
+  <way id="120" version="1">
+    <nd ref="90"/><nd ref="91"/><nd ref="92"/><nd ref="93"/><nd ref="90"/>
+    <tag k="building:part" v="roof"/>
+    <tag k="height" v="12"/>
   </way>
 
   <relation id="200" version="1">
@@ -258,6 +271,26 @@ def test_vegetation_power_landscaping_present(osm_test_db):
 
     landscaping = _fetchall(osm_test_db, "SELECT tags FROM osm_landscaping WHERE osm_id = 52")
     assert landscaping[0][0] == {"amenity": "bench"}
+
+
+def test_building_part_and_entrance_present(osm_test_db):
+    parts = _fetchall(
+        osm_test_db,
+        "SELECT tags, ST_GeometryType(geom) FROM osm_building_parts WHERE osm_id = 120",
+    )
+    assert len(parts) == 1
+    tags, geom_type = parts[0]
+    assert tags == {"building:part": "roof", "height": "12"}
+    assert geom_type == "ST_Polygon"
+
+    entrances = _fetchall(
+        osm_test_db,
+        "SELECT tags, ST_GeometryType(geom) FROM osm_entrances WHERE osm_id = 53",
+    )
+    assert len(entrances) == 1
+    tags, geom_type = entrances[0]
+    assert tags == {"entrance": "main"}
+    assert geom_type == "ST_Point"
 
 
 def test_geom_columns_have_gist_index(osm_test_db):

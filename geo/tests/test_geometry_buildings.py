@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 from topology_geo.geometry.buildings import (
     CONFIDENCE_DEFAULT,
     CONFIDENCE_FACT,
+    LAYER_BUILDING_PARTS,
+    LAYER_BUILDINGS,
     SOURCE_DEFAULT_BY_TYPE,
     SOURCE_OSM,
     compute_height_m,
@@ -21,10 +23,24 @@ from topology_geo.selection.service import SiteFeature
 SQUARE = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
 
 
-def _feature(raw_tags=None, attributes=None, confidence=None, geometry=SQUARE, osm_id=1) -> SiteFeature:
+def _feature(raw_tags=None, attributes=None, confidence=None, geometry=SQUARE, osm_id=1, layer="osm_buildings") -> SiteFeature:
     return SiteFeature(
-        layer="osm_buildings", osm_id=osm_id, osm_type="W", geometry=geometry,
+        layer=layer, osm_id=osm_id, osm_type="W", geometry=geometry,
         attributes=attributes or {}, confidence=confidence or {}, raw_tags=raw_tags or {},
+    )
+
+
+def _part(geometry, osm_id, raw_tags=None, attributes=None) -> SiteFeature:
+    return _feature(
+        raw_tags=raw_tags, attributes=attributes or {"type": "roof"}, geometry=geometry,
+        osm_id=osm_id, layer="osm_building_parts",
+    )
+
+
+def _entrance(x, y, osm_id, entrance_type="yes") -> SiteFeature:
+    return SiteFeature(
+        layer="osm_entrances", osm_id=osm_id, osm_type="N", geometry=Point(x, y),
+        attributes={"type": entrance_type}, confidence={"type": CONFIDENCE_FACT}, raw_tags={"entrance": entrance_type},
     )
 
 
@@ -241,3 +257,124 @@ def test_extrude_ignores_non_building_layers():
         attributes={}, confidence={}, raw_tags={},
     )
     assert extrude_buildings([non_building], _flat_terrain(0.0)) == []
+
+
+def test_extrude_plain_building_has_default_source_layer_and_is_not_a_part():
+    solids = extrude_buildings([_feature()], _flat_terrain(0.0))
+    assert solids[0].source_layer == LAYER_BUILDINGS
+    assert solids[0].is_part is False
+    assert solids[0].entrances == ()
+
+
+# --- building:part (Шаг 2.2, п. 1) -------------------------------------------
+
+
+def test_outline_fully_covered_by_part_is_skipped_part_extruded_instead():
+    outline = _feature(osm_id=1, geometry=SQUARE, raw_tags={"height": "9"})
+    part = _part(SQUARE, osm_id=2, raw_tags={"height": "12"})
+
+    solids = extrude_buildings([outline, part], _flat_terrain(0.0))
+
+    assert len(solids) == 1
+    assert solids[0].osm_id == 2
+    assert solids[0].height_m == pytest.approx(12.0)  # высота ЧАСТИ, не контура
+    assert solids[0].source_layer == LAYER_BUILDING_PARTS
+    assert solids[0].is_part is True
+
+
+def test_outline_without_intersecting_part_is_extruded_as_before():
+    outline = _feature(osm_id=1, geometry=SQUARE)
+    far_part = _part(Polygon([(100, 100), (110, 100), (110, 110), (100, 110)]), osm_id=2)
+
+    solids = extrude_buildings([outline, far_part], _flat_terrain(0.0))
+
+    assert {s.osm_id for s in solids} == {1, 2}
+    outline_solid = next(s for s in solids if s.osm_id == 1)
+    assert outline_solid.source_layer == LAYER_BUILDINGS
+    assert outline_solid.is_part is False
+
+
+def test_outline_partially_covered_by_part_is_still_skipped():
+    """Вики Key:building:part: если хотя бы одна часть пересекает контур,
+    контур может не рендериться реальными 3D-рендерерами - здесь так же."""
+    outline = _feature(osm_id=1, geometry=SQUARE)
+    half_part = _part(Polygon([(0, 0), (5, 0), (5, 10), (0, 10)]), osm_id=2)
+
+    solids = extrude_buildings([outline, half_part], _flat_terrain(0.0))
+
+    assert {s.osm_id for s in solids} == {2}
+
+
+def test_two_parts_covering_one_outline_each_get_own_height_and_roof():
+    outline = _feature(osm_id=1, geometry=SQUARE)
+    lower = _part(
+        Polygon([(0, 0), (5, 0), (5, 10), (0, 10)]), osm_id=2, raw_tags={"height": "6"},
+    )
+    upper = _part(
+        Polygon([(5, 0), (10, 0), (10, 10), (5, 10)]), osm_id=3,
+        raw_tags={"height": "9", "roof:shape": "gabled", "roof:height": "2"},
+    )
+
+    solids = extrude_buildings([outline, lower, upper], _flat_terrain(0.0))
+
+    by_id = {s.osm_id: s for s in solids}
+    assert set(by_id) == {2, 3}
+    assert by_id[2].height_m == pytest.approx(6.0)
+    assert by_id[2].roof_shape == "flat"
+    assert by_id[3].height_m == pytest.approx(9.0)
+    assert by_id[3].roof_shape == "gabled"
+    assert all(s.is_part for s in solids)
+
+
+def test_building_part_without_matching_outline_is_still_extruded():
+    orphan_part = _part(SQUARE, osm_id=5, raw_tags={"height": "4"})
+    solids = extrude_buildings([orphan_part], _flat_terrain(0.0))
+    assert len(solids) == 1
+    assert solids[0].height_m == pytest.approx(4.0)
+    assert solids[0].is_part is True
+
+
+# --- entrance (Шаг 2.2, п. 3) ---------------------------------------------------
+
+
+def test_entrance_inside_footprint_is_matched_to_building():
+    outline = _feature(osm_id=1, geometry=SQUARE)
+    entrance = _entrance(5.0, 0.0, osm_id=10, entrance_type="main")
+
+    solids = extrude_buildings([outline, entrance], _flat_terrain(0.0))
+
+    assert len(solids[0].entrances) == 1
+    matched = solids[0].entrances[0]
+    assert matched.entrance_type == "main"
+    assert matched.x == pytest.approx(5.0)
+    assert matched.y == pytest.approx(0.0)
+
+
+def test_entrance_far_from_any_building_is_not_matched():
+    outline = _feature(osm_id=1, geometry=SQUARE)
+    far_entrance = _entrance(500.0, 500.0, osm_id=10)
+
+    solids = extrude_buildings([outline, far_entrance], _flat_terrain(0.0))
+
+    assert solids[0].entrances == ()
+
+
+def test_entrance_matches_building_part_when_outline_is_skipped():
+    outline = _feature(osm_id=1, geometry=SQUARE)
+    part = _part(SQUARE, osm_id=2)
+    entrance = _entrance(0.0, 5.0, osm_id=10, entrance_type="staircase")
+
+    solids = extrude_buildings([outline, part, entrance], _flat_terrain(0.0))
+
+    assert len(solids) == 1
+    assert solids[0].is_part is True
+    assert [e.entrance_type for e in solids[0].entrances] == ["staircase"]
+
+
+def test_multiple_entrances_all_matched():
+    outline = _feature(osm_id=1, geometry=SQUARE)
+    entrances = [_entrance(0.0, 5.0, osm_id=10, entrance_type="main"), _entrance(10.0, 5.0, osm_id=11, entrance_type="yes")]
+
+    solids = extrude_buildings([outline, *entrances], _flat_terrain(0.0))
+
+    assert {e.entrance_type for e in solids[0].entrances} == {"main", "yes"}

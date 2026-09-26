@@ -83,6 +83,34 @@ def normalize_building(tags: Mapping[str, str]) -> dict[str, NormalizedAttribute
     }
 
 
+def normalize_building_part(tags: Mapping[str, str]) -> dict[str, NormalizedAttribute]:
+    """Тип и этажность части здания (`building:part=*`, Шаг 2.2, п. 1) — то же
+    правило, что и `normalize_building`, только тип читается из тега
+    `building:part`, а не `building` (в OSM это разные теги, по конвенции не
+    сочетаются на одном объекте — вики Key:building:part)."""
+    raw_type = _non_empty_str(tags.get("building:part"))
+    building_type = raw_type or DEFAULT_BUILDING_TYPE
+    type_confidence = CONFIDENCE_FACT if raw_type else CONFIDENCE_DEFAULT
+
+    levels = _parse_positive_int(tags.get("building:levels"))
+    levels_confidence = CONFIDENCE_FACT if levels is not None else CONFIDENCE_DEFAULT
+    if levels is None:
+        levels = DEFAULT_BUILDING_LEVELS
+
+    return {
+        "type": NormalizedAttribute(building_type, type_confidence),
+        "levels": NormalizedAttribute(levels, levels_confidence),
+    }
+
+
+def normalize_entrance(tags: Mapping[str, str]) -> dict[str, NormalizedAttribute]:
+    """Тип входа (`entrance=yes/main/staircase/exit/...`, Шаг 2.2, п. 3)."""
+    raw_type = _non_empty_str(tags.get("entrance"))
+    entrance_type = raw_type or "yes"
+    confidence = CONFIDENCE_FACT if raw_type else CONFIDENCE_DEFAULT
+    return {"type": NormalizedAttribute(entrance_type, confidence)}
+
+
 def normalize_road(tags: Mapping[str, str]) -> dict[str, NormalizedAttribute]:
     """Класс дороги и покрытие (Шаг 1.4, п. 3). Дефолт покрытия по классу —
     забота Шага 1.7; здесь тег либо есть (факт), либо нет (умолчание, значение
@@ -128,7 +156,9 @@ def normalize_vegetation(tags: Mapping[str, str]) -> dict[str, NormalizedAttribu
 
 NORMALIZERS: dict[str, Any] = {
     "osm_buildings": normalize_building,
+    "osm_building_parts": normalize_building_part,
     "osm_roads": normalize_road,
     "osm_power": normalize_power,
     "osm_vegetation": normalize_vegetation,
+    "osm_entrances": normalize_entrance,
 }

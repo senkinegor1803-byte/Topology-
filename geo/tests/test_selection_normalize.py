@@ -12,6 +12,8 @@ from topology_geo.selection.normalize import (
     CONFIDENCE_FACT,
     NORMALIZERS,
     normalize_building,
+    normalize_building_part,
+    normalize_entrance,
     normalize_power,
     normalize_road,
     normalize_vegetation,
@@ -71,6 +73,52 @@ def test_building_levels_parsing_cases(levels_tag, expected_value, expected_conf
     result = normalize_building(tags)
     assert result["levels"].value == expected_value
     assert result["levels"].confidence == expected_confidence
+
+
+# --- Части зданий (building:part) --------------------------------------------
+
+
+def test_building_part_with_type_and_levels_is_fact():
+    result = normalize_building_part({"building:part": "roof", "building:levels": "2"})
+    assert result["type"].value == "roof"
+    assert result["type"].confidence == CONFIDENCE_FACT
+    assert result["levels"].value == 2
+    assert result["levels"].confidence == CONFIDENCE_FACT
+
+
+def test_building_part_no_tags_at_all_defaults_everything():
+    result = normalize_building_part({})
+    assert result["type"].value == "yes"
+    assert result["type"].confidence == CONFIDENCE_DEFAULT
+    assert result["levels"].value == 1
+    assert result["levels"].confidence == CONFIDENCE_DEFAULT
+
+
+def test_building_part_ignores_plain_building_tag():
+    # building:part и building - разные теги (вики Key:building:part); значение
+    # building не должно просачиваться в тип части.
+    result = normalize_building_part({"building": "house", "building:part": "verticalpassage"})
+    assert result["type"].value == "verticalpassage"
+
+
+# --- Входы (entrance) ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entrance_tag", "expected_value", "expected_confidence"),
+    [
+        ("yes", "yes", CONFIDENCE_FACT),
+        ("main", "main", CONFIDENCE_FACT),
+        ("staircase", "staircase", CONFIDENCE_FACT),
+        ("   ", "yes", CONFIDENCE_DEFAULT),  # пробелы -> считается отсутствующим
+        (None, "yes", CONFIDENCE_DEFAULT),  # тег отсутствует (не должно случаться в osm_entrances, но не падает)
+    ],
+)
+def test_entrance_type_parsing_cases(entrance_tag, expected_value, expected_confidence):
+    tags = {} if entrance_tag is None else {"entrance": entrance_tag}
+    result = normalize_entrance(tags)
+    assert result["type"].value == expected_value
+    assert result["type"].confidence == expected_confidence
 
 
 # --- Дороги: класс, покрытие, полосы -----------------------------------------
@@ -178,5 +226,14 @@ def test_vegetation_no_species_or_genus_defaults_to_none():
 
 
 def test_normalizers_registry_covers_expected_layers():
-    assert set(NORMALIZERS) == {"osm_buildings", "osm_roads", "osm_power", "osm_vegetation"}
+    assert set(NORMALIZERS) == {
+        "osm_buildings",
+        "osm_building_parts",
+        "osm_roads",
+        "osm_power",
+        "osm_vegetation",
+        "osm_entrances",
+    }
     assert NORMALIZERS["osm_buildings"] is normalize_building
+    assert NORMALIZERS["osm_building_parts"] is normalize_building_part
+    assert NORMALIZERS["osm_entrances"] is normalize_entrance

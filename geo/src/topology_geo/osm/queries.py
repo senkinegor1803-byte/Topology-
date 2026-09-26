@@ -8,6 +8,7 @@ from typing import Any, Iterable, Protocol
 
 TABLES: tuple[str, ...] = (
     "osm_buildings",
+    "osm_building_parts",
     "osm_roads",
     "osm_railways",
     "osm_water_areas",
@@ -15,6 +16,7 @@ TABLES: tuple[str, ...] = (
     "osm_vegetation",
     "osm_power",
     "osm_landscaping",
+    "osm_entrances",
 )
 
 DEFAULT_MARGIN_M = 50.0

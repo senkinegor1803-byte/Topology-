@@ -10,6 +10,7 @@
 | Таблица | Геометрия | Что попадает |
 | --- | --- | --- |
 | `osm_buildings` | polygon/multipolygon | `building=*` (way, и multipolygon-отношения) |
+| `osm_building_parts` | polygon | `building:part=*` (way, Шаг 2.2, п. 1) |
 | `osm_roads` | linestring | `highway=*` |
 | `osm_railways` | linestring | `railway=*` |
 | `osm_water_areas` | polygon/multipolygon | `natural=water`, `landuse=reservoir` |
@@ -17,7 +18,14 @@
 | `osm_vegetation` | точки + полигоны | `natural=tree` (точки), `natural=wood`/`landuse=forest,grass` (полигоны) |
 | `osm_power` | точки + линии + полигоны | `power=pole/tower/substation` (точки), `power=line/minor_line` (линии), `power=substation/plant` (полигоны) |
 | `osm_landscaping` | точки + полигоны | скамейки, урны, фонари (`highway=street_lamp`), ограждения, площадки, парки |
+| `osm_entrances` | точки | `entrance=*` (Шаг 2.2, п. 3) |
 | `osm_import_log` | — | служебный журнал: источник, дата данных, дата импорта (Шаг 1.1, п. 4) |
+
+`building:part=*` — по конвенции OSM (вики Key:building:part) лежит на
+отдельном объекте от `building=*` и не имеет явной ссылки на «свой» контур;
+сопоставление контур↔части делается пространственно позже, на генераторе
+зданий (Шаг 2.2, п. 1/3, `topology_geo.geometry.buildings.extrude_buildings`), не на
+импорте.
 
 Каждая геометрическая таблица получает GIST-индекс на `geom` автоматически
 (поведение osm2pgsql flex по умолчанию — проверено локальным прогоном, не

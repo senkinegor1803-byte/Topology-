@@ -262,6 +262,13 @@ def build_site_ifc(
             "Высота_м": building.height_m,
             "Источник_высоты": building.height_source,
         }
+        if building.entrances:
+            building_pset["Входов_всего"] = len(building.entrances)
+            for i, entrance in enumerate(building.entrances, start=1):
+                building_pset[f"Вход_{i}_Тип"] = entrance.entrance_type
+                building_pset[f"Вход_{i}_X_м"] = round(entrance.x, 3)
+                building_pset[f"Вход_{i}_Y_м"] = round(entrance.y, 3)
+
         roof_pset = {}
         if building.roof_shape != ROOF_FLAT:
             roof_pset["Форма"] = building.roof_shape
@@ -271,17 +278,21 @@ def build_site_ifc(
                 dx, dy = building.roof_direction
                 roof_pset["Направление_град"] = round(math.degrees(math.atan2(dx, dy)) % 360.0, 1)
 
+        context_pset = {"Источник": "OSM (Шаг 1.1)"}
+        if building.is_part:
+            context_pset["Часть_здания"] = True  # building:part (Шаг 2.2, п. 1) - контур пропущен, см. geometry/buildings.py
+
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", f"Здание {building.osm_id}", "USERDEFINED",
             mesh,
             {
                 "Pset_Здание": building_pset,
                 "Pset_Крыша": roof_pset,
-                "Pset_Контекст": {"Источник": "OSM (Шаг 1.1)"},
+                "Pset_Контекст": context_pset,
             },
         )
         products.append(product)
-        registry.append(("osm_buildings", building.osm_id, product.GlobalId))
+        registry.append((building.source_layer, building.osm_id, product.GlobalId))
 
     def _terrain_elevation(x: float, y: float) -> float | None:
         return site_model.tin.interpolate_z(x, y) if site_model.tin is not None else 0.0

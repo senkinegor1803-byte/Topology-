@@ -14,6 +14,12 @@
 -- таблицу и как отдельный way, и как часть отношения. Это принятый в
 -- официальных примерах osm2pgsql компромисс для MVP; при необходимости
 -- решается дедупликацией по osm_id на выборке (Шаг 1.4).
+--
+-- `building:part=*` (составные здания, Шаг 2.2, п. 1) — отдельная таблица
+-- `osm_building_parts`, тем же способом, что и `osm_buildings`; по конвенции
+-- OSM (wiki: Key:building:part) это разные теги на разных объектах, way с
+-- `building:part` в этом стиле не проверяется на `building` (см.
+-- `process_way`). `entrance=*` (Шаг 2.2, п. 1/3) — точки, `osm_entrances`.
 
 local srid = 4326
 
@@ -30,6 +36,7 @@ end
 
 local tables = {
     buildings = def_table('osm_buildings', 'geometry'),       -- полигоны/мультиполигоны
+    building_parts = def_table('osm_building_parts', 'geometry'), -- building:part=*, полигоны (Шаг 2.2, п. 1)
     roads = def_table('osm_roads', 'linestring'),
     railways = def_table('osm_railways', 'linestring'),
     water_areas = def_table('osm_water_areas', 'geometry'),    -- полигоны/мультиполигоны
@@ -37,6 +44,7 @@ local tables = {
     vegetation = def_table('osm_vegetation', 'geometry'),      -- точки (дерево) + полигоны (лес/газон)
     power = def_table('osm_power', 'geometry'),                -- точки (опоры) + линии (провода) + полигоны (подстанции)
     landscaping = def_table('osm_landscaping', 'geometry'),    -- скамейки, фонари, ограждения, площадки
+    entrances = def_table('osm_entrances', 'point'),            -- entrance=*, точки (Шаг 2.2, п. 3)
 }
 
 local function has_any(tags, keys)
@@ -61,6 +69,11 @@ end
 function osm2pgsql.process_node(object)
     local tags = object.tags
 
+    if tags.entrance then
+        tables.entrances:insert({ tags = tags, geom = object:as_point() })
+        return
+    end
+
     if tags.natural == 'tree' then
         tables.vegetation:insert({ tags = tags, geom = object:as_point() })
         return
@@ -83,6 +96,11 @@ end
 
 function osm2pgsql.process_way(object)
     local tags = object.tags
+
+    if tags['building:part'] then
+        insert_way_geom(tables.building_parts, object, true)
+        return
+    end
 
     if tags.building then
         insert_way_geom(tables.buildings, object, true)

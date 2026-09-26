@@ -20,6 +20,7 @@ flowchart LR
         T1["§2.2 Кольца LOD<br/>tiling/grid.py"]:::done
         T2["§2.3 Тайлы: кеш, стыковка, параллель<br/>tiling/*, tasks/tile_tasks.py"]:::done
         T9["§2.10 Формы крыш<br/>geometry/roofs.py"]:::done
+        T10["§2.11 Части зданий/входы<br/>geometry/buildings.py"]:::done
     end
     subgraph Заготовка
         T5["§2.6 Огибающая застройки"]:::todo
@@ -35,6 +36,7 @@ flowchart LR
     T1 --> T2
     R1 -.Шаг 2.1.-> T2
     T4 -.Шаг 2.2.-> T9
+    T9 -.Шаг 2.2 п.1,3.-> T10
 
     classDef done fill:#bbf7d0,stroke:#15803d,color:#111;
     classDef todo fill:#e5e7eb,stroke:#6b7280,color:#111;
@@ -254,7 +256,8 @@ h(p) = α(p)·h_survey(p) + (1-α(p))·h_dem(p),   α(p) = clamp(dist_to_boundar
 ### 2.5 Здания: высота и низ (Шаг 1.6, водопад расширен Шагом 2.2) — реализовано
 
 Код: `geo/src/topology_geo/geometry/buildings.py`. Тесты:
-`geo/tests/test_geometry_buildings.py` (30 тестов).
+`geo/tests/test_geometry_buildings.py` (35 тестов, включая составные здания и
+входы — §2.11).
 
 ```
 height(building) = tag(height)                                  [источник = "OSM"]
@@ -418,6 +421,44 @@ V = (1/6) · Σ_triangles  v0 · (v1 × v2)      [объём замкнутог�
 Замкнутость меша (нет самопересечений/дыр) проверена подсчётом рёбер: каждое
 ориентированное ребро должно встречаться ровно в двух гранях, в
 противоположных направлениях (тот же приём, что у Шага 1.8).
+
+### 2.11 Составные здания и входы (Шаг 2.2, п. 1 и 3) — реализовано
+
+Код: `geo/src/topology_geo/geometry/buildings.py` (`extrude_buildings`,
+`_match_entrances`). Тесты: `geo/tests/test_geometry_buildings.py`,
+`geo/tests/test_osm_import_style.py`,
+`geo/tests/test_pipeline_building_parts_and_entrances.py` (сквозной прогон).
+
+`building:part=*` — не расчёт, а правило отбора геометрии, пространственное,
+не по ссылке (OSM её не даёт):
+
+```
+has_part(outline) = ∃ part ∈ building_parts: outline.footprint ∩ part.footprint ≠ ∅
+
+extrude(outline)  = ∅              , если has_part(outline)      [пропущен - см. ниже]
+                  = prism(outline) , иначе                        [как в §2.5/§2.10]
+
+extrude(part)     = prism(part)    для каждой part ∈ building_parts  [всегда]
+```
+
+Правило «контур, пересекающий хотя бы одну часть, целиком пропускается» — не
+самодельное упрощение, а прямая цитата вики (Key:building:part, проверено
+запросом при разработке): «the building=\* area might not get rendered by
+some 3D-renderers if building:part=\* is used anywhere in the building».
+Каждая часть — независимый вход в тот же водопад высоты/крыши (§2.5/§2.10),
+своя высота, своя крыша.
+
+`entrance=*` — привязка точки к зданию/части без новой геометрии:
+
+```
+entrances(solid) = { e ∈ entrance_points : dist(e, solid.footprint) ≤ 1 м }
+```
+
+Буфер 1 м — допуск на неточность привязки узла входа к контуру стены (узел
+обычно лежит точно на ребре контура, но реальная OSM-съёмка не идеальна).
+Записывается в `Pset_Здание` (`Входов_всего`, `Вход_N_Тип`, `Вход_N_X_м`,
+`Вход_N_Y_м`), не как отдельная геометрия — план ограничивает объём этого
+пункта метаданными.
 
 ## 3. Как обновлять этот документ
 
