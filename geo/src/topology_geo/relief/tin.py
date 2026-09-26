@@ -384,6 +384,40 @@ def build_profile_elevation_fn(
     return level_fn
 
 
+def long_axis_line(polygon) -> tuple[LineString | None, float, float]:
+    """Линия вдоль большего измерения вытянутого полигона — грубое
+    приближение оси (реки/полосы дороги) через середины двух КОРОТКИХ сторон
+    минимального охватывающего прямоугольника (`minimum_rotated_rectangle`);
+    используется вместе с `build_profile_elevation_fn` там, где нужна
+    отметка, гладко меняющаяся ВДОЛЬ вытянутого объекта, а не единая на весь
+    контур (вытянутый водоём/русло — `geometry/water.py`; полоса дороги —
+    `ifc/assemble.py`, Шаг 2.3, п. 5, «продольное сглаживание и поперечный
+    уклон»). Возвращает `(ось, длина короткой стороны, длина длинной
+    стороны)` — вызывающий код сам решает, достаточно ли вытянут контур,
+    чтобы доверять оси (для почти квадратного контура она выбирается
+    порядком вершин `minimum_rotated_rectangle` почти произвольно)."""
+    mrr = polygon.minimum_rotated_rectangle
+    if mrr.geom_type != "Polygon":
+        return None, 0.0, 0.0
+    coords = list(mrr.exterior.coords)[:-1]
+    if len(coords) != 4:
+        return None, 0.0, 0.0
+    edges = [LineString([coords[i], coords[(i + 1) % 4]]) for i in range(4)]
+    lengths = [edge.length for edge in edges]
+    if max(lengths) <= 0:
+        return None, 0.0, 0.0
+    short_idx = min(range(4), key=lambda i: lengths[i])
+    opposite_idx = (short_idx + 2) % 4
+    long_idx = (short_idx + 1) % 4
+    short_len, long_len = lengths[short_idx], lengths[long_idx]
+    p1 = edges[short_idx].interpolate(0.5, normalized=True)
+    p2 = edges[opposite_idx].interpolate(0.5, normalized=True)
+    axis = LineString([p1, p2])
+    if axis.length <= 0:
+        return None, short_len, long_len
+    return axis, short_len, long_len
+
+
 def build_site_tin(
     relief_values: np.ndarray,
     relief_grid: Grid,

@@ -31,6 +31,7 @@ import ifcopenshell.api.spatial
 import ifcopenshell.api.unit
 import mapbox_earcut as earcut
 import numpy as np
+from shapely.geometry import Point
 
 from topology_geo.geometry.buildings import BuildingSolid
 from topology_geo.geometry.rail import RailRibbon
@@ -44,7 +45,7 @@ from topology_geo.geometry.roofs import (
 from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRibbon
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
-from topology_geo.relief.tin import SiteTin
+from topology_geo.relief.tin import SiteTin, build_profile_elevation_fn, long_axis_line
 
 Vertex = tuple[float, float, float]
 Face = tuple[int, ...]
@@ -75,13 +76,66 @@ def pavement_elevation_fn(terrain_elevation_fn: ElevationFn) -> ElevationFn:
     return _fn
 
 
-def marking_elevation_fn(terrain_elevation_fn: ElevationFn) -> ElevationFn:
-    """Обёртка над отметкой рельефа: разметка на `MARKING_CLEARANCE_M` выше
-    самого покрытия (`pavement_elevation_fn`), а не наравне с ним."""
-    pavement_fn = pavement_elevation_fn(terrain_elevation_fn)
+# Шаг 2.3, п. 5: «посадка на рельеф с продольным сглаживанием и поперечным
+# уклоном» — до этого лента/полоса сэмплировала TIN независимо в каждой
+# вершине контура (см. `docs/pavement.md`), без какой-либо связи между
+# соседними вершинами вдоль оси и без поперечного профиля вообще.
+LANE_PROFILE_STEP_M = 1.0
+LANE_PROFILE_SMOOTHING_WINDOW_M = 15.0
+# Типовой поперечный уклон проезжей части — 15-25 ‰ по нормам проектирования
+# автодорог в зависимости от типа покрытия; здесь единое значение для всех
+# типов полос (проезжая часть/тротуар/бордюр...) — упрощение, не разбито по
+# классу/покрытию.
+LANE_CROSS_SLOPE = 0.02
+# Ниже этого соотношения сторон своя ось полосы ненадёжна (тот же довод, что
+# у `WATER_AREA_ELONGATION_RATIO` в `geometry/water.py`, но порог мягче:
+# полоса дороги — узкая лента почти всегда, даже короткий обрубок у
+# перекрёстка обычно вытянут заметно сильнее компактного пруда).
+LANE_ELONGATION_RATIO = 1.5
+
+
+def lane_pavement_elevation_fn(polygon, terrain_elevation_fn: ElevationFn) -> ElevationFn:
+    """Отметка полосы/ленты дороги (Шаг 2.3, п. 5) — сглаженный продольный
+    профиль вдоль СВОЕЙ оси (`relief.tin.long_axis_line` +
+    `build_profile_elevation_fn`, та же техника, что у продольного профиля
+    дороги, Шаг 1.5 п. 2, и у уровня вытянутого водоёма/русла,
+    `geometry/water.py`) плюс поперечный уклон от оси к краям
+    (`LANE_CROSS_SLOPE`) плюс `PAVEMENT_CLEARANCE_M`.
+
+    Ось — своя у КАЖДОЙ полосы, не общая на всю дорогу: у соседних полос
+    одной дороги (проезжая часть, тротуар, бордюр) оси почти параллельны на
+    прямом участке — заметного шва между ними это не даёт, а получить
+    единую ось дороги здесь неоткуда (`LaneRibbon` не хранит исходную линию
+    проезда, только id way и уже готовый полигон, см. `geometry/streets.py`).
+    Для короткого/почти квадратного фрагмента (плоская площадка, обрубок у
+    перекрёстка) `long_axis_line` не даёт надёжной оси — тогда обычная
+    плоская посадка без профиля/уклона (`pavement_elevation_fn`)."""
+    axis, short_len, long_len = long_axis_line(polygon)
+    if axis is None or axis.length <= 0 or short_len <= 0 or long_len / short_len < LANE_ELONGATION_RATIO:
+        return pavement_elevation_fn(terrain_elevation_fn)
+
+    profile_fn = build_profile_elevation_fn(
+        axis, terrain_elevation_fn, step=LANE_PROFILE_STEP_M, window_m=LANE_PROFILE_SMOOTHING_WINDOW_M
+    )
 
     def _fn(x: float, y: float) -> float | None:
-        z = pavement_fn(x, y)
+        z = profile_fn(x, y)
+        if z is None:
+            return None
+        cross_offset = axis.distance(Point(x, y))
+        return z - LANE_CROSS_SLOPE * cross_offset + PAVEMENT_CLEARANCE_M
+
+    return _fn
+
+
+def lane_marking_elevation_fn(polygon, terrain_elevation_fn: ElevationFn) -> ElevationFn:
+    """Отметка разметки — та же посадка, что у полосы под ней
+    (`lane_pavement_elevation_fn`, своя ось разметочного штриха/стрелки),
+    плюс `MARKING_CLEARANCE_M` поверх покрытия."""
+    base_fn = lane_pavement_elevation_fn(polygon, terrain_elevation_fn)
+
+    def _fn(x: float, y: float) -> float | None:
+        z = base_fn(x, y)
         return None if z is None else z + MARKING_CLEARANCE_M
 
     return _fn
@@ -354,7 +408,6 @@ def build_site_ifc(
         return site_model.tin.interpolate_z(x, y) if site_model.tin is not None else 0.0
 
     _pavement_elevation = pavement_elevation_fn(_terrain_elevation)
-    _marking_elevation = marking_elevation_fn(_terrain_elevation)
 
     # IfcRoad — нативно в IFC4X3 (IfcSpatialElement, роднится с сайтом через
     # aggregate.assign_object, как в Шаге 0.2); в IFC4 схема его не знает,
@@ -364,7 +417,7 @@ def build_site_ifc(
     for road in site_model.roads:
         polys = road.ribbon.geoms if road.ribbon.geom_type.startswith("Multi") else [road.ribbon]
         for poly in polys:
-            mesh = flat_polygon_mesh(poly, _pavement_elevation)
+            mesh = flat_polygon_mesh(poly, lane_pavement_elevation_fn(poly, _terrain_elevation))
             road_pset = {
                 "Класс": road.highway_class,
                 "Покрытие": road.surface or "",
@@ -395,7 +448,7 @@ def build_site_ifc(
     # только последний GlobalId на такой `osm_id` - тот же принятый компромисс
     # (реестр рассчитан на 1 запись на исходный объект, не на под-объекты).
     for lane in site_model.lanes:
-        mesh = flat_polygon_mesh(lane.polygon, _pavement_elevation)
+        mesh = flat_polygon_mesh(lane.polygon, lane_pavement_elevation_fn(lane.polygon, _terrain_elevation))
         lane_name = "Полоса " + "+".join(str(i) for i in lane.osm_way_ids)
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", lane_name, "USERDEFINED",
@@ -434,7 +487,9 @@ def build_site_ifc(
     for marking in site_model.markings:
         markings_by_kind.setdefault(marking.kind, []).append(marking)
     for kind, markings in markings_by_kind.items():
-        mesh = _combine_meshes([flat_polygon_mesh(m.polygon, _marking_elevation) for m in markings])
+        mesh = _combine_meshes(
+            [flat_polygon_mesh(m.polygon, lane_marking_elevation_fn(m.polygon, _terrain_elevation)) for m in markings]
+        )
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", f"Разметка ({kind})", "USERDEFINED",
             mesh,

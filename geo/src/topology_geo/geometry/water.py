@@ -32,6 +32,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from topology_geo.relief.tin import build_profile_elevation_fn
+from topology_geo.relief.tin import long_axis_line as raw_long_axis_line
 from topology_geo.selection.service import SiteFeature
 
 DEFAULT_WATERWAY_WIDTH_M = 3.0
@@ -129,37 +130,19 @@ def _smooth_line(line: LineString, iterations: int = SMOOTHING_ITERATIONS) -> Li
 
 
 def _long_axis_line(polygon: Polygon) -> LineString | None:
-    """Линия вдоль большего измерения ВЫТЯНУТОГО полигона (грубое приближение
-    оси течения) — через середины двух КОРОТКИХ сторон минимального
-    охватывающего прямоугольника (`minimum_rotated_rectangle`). `None` для
-    компактного водоёма (соотношение сторон меньше
-    `WATER_AREA_ELONGATION_RATIO`) — намеренно, не как приближение: единственная
-    ось компактного/квадратного контура выбирается почти произвольно (порядок
-    вершин `minimum_rotated_rectangle`) и с тем же успехом может лечь
-    ПЕРЕК уклона, а не вдоль него, тогда профиль вдоль неё был бы ПОЧТИ
-    ПОСТОЯННЫМ там, где сам уклон, наоборот, значим — то есть хуже, не лучше,
-    единого `min` по всему контуру. Единый уровень для компактного водоёма к
-    тому же физически верен: поверхность воды там действительно плоская."""
-    mrr = polygon.minimum_rotated_rectangle
-    if mrr.geom_type != "Polygon":
+    """Ось водоёма — `relief.tin.long_axis_line`, но `None` для КОМПАКТНОГО
+    водоёма (соотношение сторон меньше `WATER_AREA_ELONGATION_RATIO`) —
+    намеренно, не как приближение: единственная ось компактного/квадратного
+    контура выбирается почти произвольно (порядком вершин
+    `minimum_rotated_rectangle`) и с тем же успехом может лечь ПОПЕРЁК
+    уклона, а не вдоль него, тогда профиль вдоль неё был бы ПОЧТИ ПОСТОЯННЫМ
+    там, где сам уклон, наоборот, значим — то есть хуже, не лучше, единого
+    `min` по всему контуру. Единый уровень для компактного водоёма к тому же
+    физически верен: поверхность воды там действительно плоская."""
+    axis, short_len, long_len = raw_long_axis_line(polygon)
+    if axis is None or short_len <= 0 or long_len / short_len < WATER_AREA_ELONGATION_RATIO:
         return None
-    coords = list(mrr.exterior.coords)[:-1]
-    if len(coords) != 4:
-        return None
-    edges = [LineString([coords[i], coords[(i + 1) % 4]]) for i in range(4)]
-    lengths = [edge.length for edge in edges]
-    if max(lengths) <= 0:
-        return None
-    short_idx = min(range(4), key=lambda i: lengths[i])
-    opposite_idx = (short_idx + 2) % 4
-    long_idx = (short_idx + 1) % 4
-    short_len, long_len = lengths[short_idx], lengths[long_idx]
-    if short_len <= 0 or long_len / short_len < WATER_AREA_ELONGATION_RATIO:
-        return None
-    p1 = edges[short_idx].interpolate(0.5, normalized=True)
-    p2 = edges[opposite_idx].interpolate(0.5, normalized=True)
-    axis = LineString([p1, p2])
-    return axis if axis.length > 0 else None
+    return axis
 
 
 def _water_area_level(polygon: Polygon, terrain_elevation_fn: ElevationFn) -> tuple[LevelFn, float]:

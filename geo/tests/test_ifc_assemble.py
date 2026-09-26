@@ -17,6 +17,7 @@ from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRib
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.ifc.assemble import (
+    LANE_CROSS_SLOPE,
     MARKING_CLEARANCE_M,
     PAVEMENT_CLEARANCE_M,
     BasePoint,
@@ -24,7 +25,8 @@ from topology_geo.ifc.assemble import (
     build_site_ifc,
     extrude_polygon_mesh,
     flat_polygon_mesh,
-    marking_elevation_fn,
+    lane_marking_elevation_fn,
+    lane_pavement_elevation_fn,
     mesh_cylinder,
     pavement_elevation_fn,
     triangulate_polygon,
@@ -387,12 +389,39 @@ def test_pavement_elevation_fn_propagates_none():
     assert pavement(0.0, 0.0) is None
 
 
-def test_marking_elevation_fn_sits_above_pavement():
+def test_lane_marking_elevation_fn_sits_above_pavement():
     """Разметка — тонкий слой краски НА покрытии, ещё выше него — иначе линия
-    разметки зрительно тонула бы в асфальте, поднятом над рельефом."""
+    разметки зрительно тонула бы в асфальте, поднятом над рельефом. Точка
+    почти на оси штриха (нулевой поперечный снос) - чистая проверка
+    вертикального зазора без примеси поперечного уклона."""
     terrain = lambda x, y: 100.0
-    marking = marking_elevation_fn(terrain)
-    assert marking(0.0, 0.0) == pytest.approx(100.0 + PAVEMENT_CLEARANCE_M + MARKING_CLEARANCE_M)
+    marking_poly = Polygon([(-2, -0.05), (2, -0.05), (2, 0.05), (-2, 0.05)])
+    marking = lane_marking_elevation_fn(marking_poly, terrain)
+    assert marking(0.0, 0.0) == pytest.approx(100.0 + PAVEMENT_CLEARANCE_M + MARKING_CLEARANCE_M, abs=1e-6)
+
+
+def test_lane_pavement_elevation_fn_falls_back_to_flat_for_compact_polygon():
+    """Почти квадратный (не вытянутый) фрагмент полосы — своя ось ненадёжна
+    (см. докстринг `lane_pavement_elevation_fn`), посадка — обычная плоская,
+    без продольного профиля/поперечного уклона."""
+    terrain = lambda x, y: 100.0 + 0.01 * x
+    compact_poly = Polygon([(0, 0), (4, 0), (4, 4), (0, 4)])
+    lane_fn = lane_pavement_elevation_fn(compact_poly, terrain)
+    assert lane_fn(2.0, 2.0) == pytest.approx(terrain(2.0, 2.0) + PAVEMENT_CLEARANCE_M, abs=1e-6)
+
+
+def test_lane_pavement_elevation_fn_applies_cross_slope_for_elongated_polygon():
+    """Вытянутая полоса на РОВНОМ рельефе — отметка на оси выше, чем у края
+    (поперечный уклон стока, `LANE_CROSS_SLOPE`), а вдоль оси не меняется."""
+    terrain = lambda x, y: 100.0
+    lane_poly = Polygon([(-20, -2), (20, -2), (20, 2), (-20, 2)])  # вдоль X, ширина 4 м
+    lane_fn = lane_pavement_elevation_fn(lane_poly, terrain)
+
+    center = lane_fn(0.0, 0.0)
+    edge = lane_fn(0.0, 2.0)
+    assert center == pytest.approx(100.0 + PAVEMENT_CLEARANCE_M, abs=1e-6)
+    assert edge == pytest.approx(center - LANE_CROSS_SLOPE * 2.0, abs=1e-6)
+    assert lane_fn(-15.0, 0.0) == pytest.approx(lane_fn(15.0, 0.0), abs=1e-6)  # вдоль оси на ровном рельефе не меняется
 
 
 def test_build_site_ifc_road_lane_and_marking_are_above_terrain_end_to_end():
