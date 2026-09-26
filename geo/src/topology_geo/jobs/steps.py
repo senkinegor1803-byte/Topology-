@@ -17,7 +17,7 @@ import numpy as np
 from affine import Affine
 
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
-from topology_geo.geometry.buildings import extrude_buildings
+from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
 from topology_geo.geometry.rail import build_rail_ribbons
 from topology_geo.geometry.roads import build_road_ribbons
 from topology_geo.geometry.vegetation import build_individual_trees, scatter_forest_trees
@@ -163,7 +163,10 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     relief_values, relief_grid = read_relief_from_storage(storage, f"jobs/{job.id}/relief.tif")
     tin = build_site_tin(relief_values, relief_grid, center_x, center_y, job.radius_m, dataset.features)
 
-    buildings = extrude_buildings(dataset.features, tin.interpolate_z)
+    # Overture Buildings как второй уровень водопада высоты (Шаг 2.2, п. 2) -
+    # реального доступа к датасету в этой среде нет (см. NullOvertureSource);
+    # подключение реального источника не потребует изменений здесь.
+    buildings = extrude_buildings(dataset.features, tin.interpolate_z, NullOvertureSource())
     roads = build_road_ribbons(dataset.features)
     water_areas = build_water_areas(dataset.features, tin.interpolate_z)
     waterways = build_waterway_ribbons(dataset.features)

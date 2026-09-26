@@ -41,7 +41,7 @@ def _make_flat_tin(half_extent: float = 50.0, n: int = 6) -> SiteTin:
 def _make_site_model() -> SiteModel:
     building = BuildingSolid(
         osm_id=1, footprint=Polygon([(-10, -10), (10, -10), (10, 10), (-10, 10)]),
-        height_m=12.0, height_confidence="факт", base_z=100.0, building_type="жилой",
+        height_m=12.0, height_confidence="факт", height_source="OSM", base_z=100.0, building_type="жилой",
     )
     road = RoadRibbon(
         osm_id=2, ribbon=LineString([(-40, 0), (40, 0)]).buffer(3.0, cap_style="flat"),
@@ -95,7 +95,7 @@ def test_convert_ifc_to_glb_node_extras_carry_globalid_class_and_psets():
 
     assert building_node.extras["ifcClass"] == "IfcBuildingElementProxy"
     assert building_node.extras["psets"]["Pset_Здание"]["Высота_м"] == pytest.approx(12.0)
-    assert building_node.extras["psets"]["Pset_Здание"]["Источник_высоты"] == "факт"
+    assert building_node.extras["psets"]["Pset_Здание"]["Источник_высоты"] == "OSM"
     assert "id" not in building_node.extras["psets"]["Pset_Здание"]
 
 

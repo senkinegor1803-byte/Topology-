@@ -141,7 +141,7 @@ def _make_flat_tin(half_extent: float = 50.0, n: int = 6) -> SiteTin:
 def _make_site_model() -> SiteModel:
     building = BuildingSolid(
         osm_id=1, footprint=Polygon([(-10, -10), (10, -10), (10, 10), (-10, 10)]),
-        height_m=12.0, height_confidence="факт", base_z=100.0, building_type="жилой",
+        height_m=12.0, height_confidence="факт", height_source="OSM", base_z=100.0, building_type="жилой",
     )
     road = RoadRibbon(
         osm_id=2, ribbon=LineString([(-40, 0), (40, 0)]).buffer(3.0, cap_style="flat"),

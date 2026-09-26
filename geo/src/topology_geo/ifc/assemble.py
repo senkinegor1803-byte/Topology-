@@ -35,6 +35,12 @@ import numpy as np
 from topology_geo.geometry.buildings import BuildingSolid
 from topology_geo.geometry.rail import RailRibbon
 from topology_geo.geometry.roads import RoadRibbon
+from topology_geo.geometry.roofs import (
+    ROOF_FLAT,
+    RoofParams,
+    build_pitched_building_mesh,
+    oriented_bounding_box,
+)
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.relief.tin import SiteTin
@@ -236,16 +242,41 @@ def build_site_ifc(
         products.append(terrain)
 
     for building in site_model.buildings:
-        mesh = extrude_polygon_mesh(building.footprint, building.base_z, building.base_z + building.height_m)
+        if building.roof_shape == ROOF_FLAT:
+            mesh = extrude_polygon_mesh(building.footprint, building.base_z, building.base_z + building.height_m)
+        else:
+            obb = oriented_bounding_box(building.footprint)
+            roof_params = RoofParams(
+                shape=building.roof_shape,
+                shape_confidence=building.roof_height_confidence,  # не используется при сборке меша
+                height_m=building.roof_height_m,
+                height_confidence=building.roof_height_confidence,
+                ridge_along_long_axis=building.roof_ridge_along_long_axis,
+                direction=building.roof_direction,
+            )
+            eave_z = building.base_z + building.height_m - building.roof_height_m
+            mesh = build_pitched_building_mesh(obb, roof_params, building.base_z, eave_z)
+
+        building_pset = {
+            "Тип": building.building_type,
+            "Высота_м": building.height_m,
+            "Источник_высоты": building.height_source,
+        }
+        roof_pset = {}
+        if building.roof_shape != ROOF_FLAT:
+            roof_pset["Форма"] = building.roof_shape
+            roof_pset["Высота_конька_м"] = building.roof_height_m
+            roof_pset["Источник_высоты"] = building.roof_height_confidence
+            if building.roof_direction is not None:
+                dx, dy = building.roof_direction
+                roof_pset["Направление_град"] = round(math.degrees(math.atan2(dx, dy)) % 360.0, 1)
+
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", f"Здание {building.osm_id}", "USERDEFINED",
             mesh,
             {
-                "Pset_Здание": {
-                    "Тип": building.building_type,
-                    "Высота_м": building.height_m,
-                    "Источник_высоты": building.height_confidence,
-                },
+                "Pset_Здание": building_pset,
+                "Pset_Крыша": roof_pset,
                 "Pset_Контекст": {"Источник": "OSM (Шаг 1.1)"},
             },
         )

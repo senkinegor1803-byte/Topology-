@@ -10,6 +10,8 @@ from shapely.geometry import Polygon
 from topology_geo.geometry.buildings import (
     CONFIDENCE_DEFAULT,
     CONFIDENCE_FACT,
+    SOURCE_DEFAULT_BY_TYPE,
+    SOURCE_OSM,
     compute_height_m,
     extrude_buildings,
     repair_footprint,
@@ -31,52 +33,91 @@ def _feature(raw_tags=None, attributes=None, confidence=None, geometry=SQUARE, o
 
 def test_height_tag_takes_priority():
     feature = _feature(raw_tags={"height": "17.5"}, attributes={"levels": 3}, confidence={"levels": CONFIDENCE_FACT})
-    height, confidence = compute_height_m(feature)
+    height, confidence, source = compute_height_m(feature)
     assert height == pytest.approx(17.5)
     assert confidence == CONFIDENCE_FACT
+    assert source == SOURCE_OSM
 
 
 def test_malformed_height_tag_falls_back_to_levels():
     feature = _feature(raw_tags={"height": "tall"}, attributes={"levels": 4}, confidence={"levels": CONFIDENCE_FACT})
-    height, confidence = compute_height_m(feature)
+    height, confidence, source = compute_height_m(feature)
     assert height == pytest.approx(4 * 3 + 1)
     assert confidence == CONFIDENCE_FACT
+    assert source == SOURCE_OSM
 
 
 def test_negative_height_tag_falls_back_to_levels():
     feature = _feature(raw_tags={"height": "-5"}, attributes={"levels": 2}, confidence={"levels": CONFIDENCE_FACT})
-    height, confidence = compute_height_m(feature)
+    height, confidence, source = compute_height_m(feature)
     assert height == pytest.approx(2 * 3 + 1)
     assert confidence == CONFIDENCE_FACT
+    assert source == SOURCE_OSM
 
 
 def test_levels_used_when_no_height_tag():
     feature = _feature(attributes={"levels": 5}, confidence={"levels": CONFIDENCE_FACT})
-    height, confidence = compute_height_m(feature)
+    height, confidence, source = compute_height_m(feature)
     assert height == pytest.approx(5 * 3 + 1)
     assert confidence == CONFIDENCE_FACT
+    assert source == SOURCE_OSM
 
 
 def test_default_levels_confidence_does_not_count_as_fact():
     """levels=1 умолчанием (Шаг 1.4) не должен трактоваться как факт этажности."""
     feature = _feature(attributes={"type": "house", "levels": 1}, confidence={"levels": CONFIDENCE_DEFAULT})
-    height, confidence = compute_height_m(feature)
+    height, confidence, source = compute_height_m(feature)
     assert height == pytest.approx(8.0)  # default_height("house")
     assert confidence == CONFIDENCE_DEFAULT
+    assert source == SOURCE_DEFAULT_BY_TYPE
 
 
 def test_known_type_default_height():
     feature = _feature(attributes={"type": "apartments", "levels": 1}, confidence={"levels": CONFIDENCE_DEFAULT})
-    height, confidence = compute_height_m(feature)
+    height, confidence, source = compute_height_m(feature)
     assert height == pytest.approx(25.0)
     assert confidence == CONFIDENCE_DEFAULT
+    assert source == SOURCE_DEFAULT_BY_TYPE
 
 
 def test_unknown_type_uses_fallback_default():
     feature = _feature(attributes={"type": "some_unusual_tag", "levels": 1}, confidence={"levels": CONFIDENCE_DEFAULT})
-    height, confidence = compute_height_m(feature)
+    height, confidence, source = compute_height_m(feature)
     assert height == pytest.approx(9.0)
     assert confidence == CONFIDENCE_DEFAULT
+    assert source == SOURCE_DEFAULT_BY_TYPE
+
+
+def test_overture_source_used_when_osm_missing_and_overture_available():
+    class FakeOverture:
+        def lookup(self, osm_id, footprint):
+            return 42.0
+
+    feature = _feature(attributes={"type": "house", "levels": 1}, confidence={"levels": CONFIDENCE_DEFAULT})
+    height, confidence, source = compute_height_m(feature, overture_source=FakeOverture())
+    assert height == pytest.approx(42.0)
+    assert confidence == CONFIDENCE_FACT
+    assert source == "Overture"
+
+
+def test_null_overture_source_always_falls_through_to_type_default():
+    from topology_geo.geometry.buildings import NullOvertureSource
+
+    feature = _feature(attributes={"type": "house", "levels": 1}, confidence={"levels": CONFIDENCE_DEFAULT})
+    height, _confidence, source = compute_height_m(feature, overture_source=NullOvertureSource())
+    assert height == pytest.approx(8.0)
+    assert source == SOURCE_DEFAULT_BY_TYPE
+
+
+def test_osm_height_tag_takes_priority_over_overture():
+    class FakeOverture:
+        def lookup(self, osm_id, footprint):
+            return 999.0
+
+    feature = _feature(raw_tags={"height": "17.5"})
+    height, _confidence, source = compute_height_m(feature, overture_source=FakeOverture())
+    assert height == pytest.approx(17.5)
+    assert source == SOURCE_OSM
 
 
 # --- repair_footprint -----------------------------------------------------
@@ -168,6 +209,30 @@ def test_extrude_propagates_height_and_confidence():
     solids = extrude_buildings([feature], _flat_terrain(0.0))
     assert solids[0].height_m == pytest.approx(12.3)
     assert solids[0].height_confidence == CONFIDENCE_FACT
+
+
+def test_extrude_defaults_to_flat_roof_without_roof_shape_tag():
+    feature = _feature()
+    solids = extrude_buildings([feature], _flat_terrain(0.0))
+    assert solids[0].roof_shape == "flat"
+    assert solids[0].roof_height_m == 0.0
+
+
+def test_extrude_picks_up_gabled_roof_shape_and_height():
+    feature = _feature(raw_tags={"height": "20", "roof:shape": "gabled", "roof:height": "3"})
+    solids = extrude_buildings([feature], _flat_terrain(0.0))
+    assert solids[0].roof_shape == "gabled"
+    assert solids[0].roof_height_m == pytest.approx(3.0)
+    assert solids[0].height_m == pytest.approx(20.0)
+
+
+def test_extrude_falls_back_to_flat_when_roof_height_exceeds_total_height():
+    """Противоречивые теги (roof:height >= height) - не строим вывернутую
+    геометрию, откатываемся на плоскую крышу."""
+    feature = _feature(raw_tags={"height": "5", "roof:shape": "hipped", "roof:height": "8"})
+    solids = extrude_buildings([feature], _flat_terrain(0.0))
+    assert solids[0].roof_shape == "flat"
+    assert solids[0].roof_height_m == 0.0
 
 
 def test_extrude_ignores_non_building_layers():
