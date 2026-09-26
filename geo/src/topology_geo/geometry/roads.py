@@ -1,7 +1,14 @@
 """Дороги: ленты по оси (Шаг 1.7, п. 1); классификация каркасная/
 внутриквартальная (Шаг 2.4, п. 1) — `topology_geo.geometry.road_network`;
 параметрическая перестройка внутриквартальной ленты по новой оси (Шаг 2.4,
-п. 5) — `rebuild_road_ribbon`."""
+п. 5) — `rebuild_road_ribbon`.
+
+`is_bridge` (Шаг 2.5, п. 1) живёт здесь, а не в `geometry/bridges.py`,
+потому что `build_road_ribbons` сам исключает мостовые участки (строятся
+отдельно, `build_bridge_ribbons` — пролётное строение, а не лента вровень с
+рельефом) — `geometry/bridges.py` импортирует эту функцию и другие
+переиспользуемые части (`compute_width_m`, `CONFIDENCE_*`) отсюда, а не
+наоборот, чтобы не создавать циклический импорт."""
 
 from __future__ import annotations
 
@@ -51,6 +58,14 @@ class RoadRibbon:
     axis: LineString | None = None
 
 
+def is_bridge(raw_tags: dict) -> bool:
+    """`bridge=*` - реальный мост/путепровод (Шаг 2.5, п. 1). `bridge=no`
+    (явный отказ от унаследованного значения, например у relation-члена) и
+    отсутствие тега вовсе - не мост."""
+    value = str(raw_tags.get("bridge", "")).strip().lower()
+    return bool(value) and value != "no"
+
+
 def compute_width_m(feature: SiteFeature) -> tuple[float, str]:
     """Ширина проезжей части: `width` тег -> по классу дороги (Шаг 1.7, п. 1)."""
     width_tag = feature.raw_tags.get("width")
@@ -73,10 +88,14 @@ def _as_lines(geom):
 
 
 def build_road_ribbons(features: list[SiteFeature]) -> list[RoadRibbon]:
-    """Дорога (ось) -> лента (`LineString.buffer` с плоскими торцами, п. 1)."""
+    """Дорога (ось) -> лента (`LineString.buffer` с плоскими торцами, п. 1).
+
+    Мостовые участки (`is_bridge`, Шаг 2.5, п. 1) сюда не попадают —
+    у них пролётное строение с отметкой по интерполяции между устоями
+    (`geometry.bridges.build_bridge_ribbons`), а не лента вровень с рельефом."""
     ribbons: list[RoadRibbon] = []
     for feature in features:
-        if feature.layer != "osm_roads":
+        if feature.layer != "osm_roads" or is_bridge(feature.raw_tags):
             continue
 
         lines = _as_lines(feature.geometry)

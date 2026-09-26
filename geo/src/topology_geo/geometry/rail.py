@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from shapely.geometry import LineString
 from shapely.ops import unary_union
 
 from topology_geo.selection.service import SiteFeature
@@ -19,6 +20,10 @@ class RailRibbon:
     osm_id: int
     ballast: object  # shapely Polygon/MultiPolygon, локальные координаты
     rail_type: str  # rail | tram | light_rail и т.п. (тег railway=*)
+    # Ось пути (Шаг 2.5, п. 3: проверка габарита моста над нижележащими
+    # путями нужна ось для точки пересечения) - только для ОДНОГО цельного
+    # сегмента линии, тот же принцип, что и у `RoadRibbon.axis` (Шаг 2.4).
+    axis: LineString | None = None
 
 
 def _as_lines(geom):
@@ -39,5 +44,10 @@ def build_rail_ribbons(features: list[SiteFeature], *, ballast_width_m: float = 
         if ballast.is_empty:
             continue
         rail_type = feature.raw_tags.get("railway") or DEFAULT_RAIL_TYPE
-        result.append(RailRibbon(osm_id=feature.osm_id, ballast=ballast, rail_type=rail_type))
+        result.append(
+            RailRibbon(
+                osm_id=feature.osm_id, ballast=ballast, rail_type=rail_type,
+                axis=lines[0] if len(lines) == 1 else None,
+            )
+        )
     return result

@@ -17,6 +17,7 @@ import numpy as np
 from affine import Affine
 
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
+from topology_geo.geometry.bridges import build_bridge_ribbons
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
 from topology_geo.geometry.rail import build_rail_ribbons
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
@@ -150,13 +151,17 @@ def select_and_normalize(conn: Any, storage: ObjectStorage, job: store.Job) -> d
 
 
 def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
-    """Шаги 4-5 (Шаги 1.5-1.8): TIN участка, здания/дороги/вода/рельсы/деревья
-    и сборка `site.ifc` в обеих схемах (IFC4, IFC4X3), с реестром GlobalId в
-    PostGIS (Шаг 1.8, п. 2). Плюс (Шаг 2.4, п. 4) два дополнительных файла на
-    каждую схему — `roads_backbone_*.ifc`/`roads_internal_*.ifc`, только
-    дорожная сеть соответствующей классификации (`build_site_ifc`,
-    `road_network_filter`), каркасная помечена нередактируемой
-    (`Pset_Дорога/Полоса.Редактируемый=false`)."""
+    """Шаги 4-5 (Шаги 1.5-1.8): TIN участка, здания/дороги/мосты/вода/рельсы/
+    деревья и сборка `site.ifc` в обеих схемах (IFC4, IFC4X3), с реестром
+    GlobalId в PostGIS (Шаг 1.8, п. 2). Плюс (Шаг 2.4, п. 4) два
+    дополнительных файла на каждую схему — `roads_backbone_*.ifc`/
+    `roads_internal_*.ifc`, только дорожная сеть соответствующей
+    классификации (`build_site_ifc`, `road_network_filter`), каркасная
+    помечена нередактируемой (`Pset_Дорога/Полоса.Редактируемый=false`).
+
+    Мосты (Шаг 2.5, п. 1-3, `geometry.bridges.build_bridge_ribbons`) строятся
+    ПОСЛЕ `roads`/`rail` — габарит проверяется по их осям (`RoadRibbon.axis`/
+    `RailRibbon.axis`)."""
     zone = pick_msk59_zone(job.center_lon)
     center_x, center_y, _ = wgs84_to_msk59(job.center_lon, job.center_lat, zone=zone)
 
@@ -180,6 +185,17 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     rail = build_rail_ribbons(dataset.features)
     trees = build_individual_trees(dataset.features) + scatter_forest_trees(dataset.features)
 
+    # Мосты, путепроводы (Шаг 2.5, п. 1-3) - габарит проверяется по осям уже
+    # построенных немостовых дорог/путей (`RoadRibbon.axis`/`RailRibbon.axis`,
+    # Шаг 2.4/2.5); дорога-мост сама не входит в `roads` (`is_bridge` в
+    # `build_road_ribbons`, `geometry.roads`), поэтому мост не проверяется
+    # сам на себя.
+    bridges = build_bridge_ribbons(
+        dataset.features, tin.interpolate_z,
+        crossing_road_axes=[r.axis for r in roads if r.axis is not None],
+        crossing_rail_axes=[r.axis for r in rail if r.axis is not None],
+    )
+
     # Полосы через osm2streets (Шаг 2.3, п. 1 и 3) - честный водопад: если
     # инструмента нет в окружении (см. `is_osm2streets_available`), участок
     # остаётся с одной лентой на дорогу (Шаг 1.7, `roads` выше), не падает -
@@ -190,7 +206,7 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         street_network = build_lane_network(raw_roads, job.center_lon, job.center_lat, job.radius_m, zone)
 
     site_model = SiteModel(
-        tin=tin, buildings=buildings, roads=roads,
+        tin=tin, buildings=buildings, roads=roads, bridges=bridges,
         water_areas=water_areas, waterways=waterways, rail=rail, trees=trees,
         lanes=street_network.lanes, intersections=street_network.intersections, markings=street_network.markings,
     )
@@ -243,6 +259,7 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         "tin_vertices": int(tin.vertices.shape[0]),
         "buildings": len(buildings),
         "roads": len(roads),
+        "bridges": len(bridges),
         "water_areas": len(water_areas),
         "waterways": len(waterways),
         "rail": len(rail),

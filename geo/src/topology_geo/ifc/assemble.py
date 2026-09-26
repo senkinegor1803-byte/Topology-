@@ -33,6 +33,7 @@ import mapbox_earcut as earcut
 import numpy as np
 from shapely.geometry import Point
 
+from topology_geo.geometry.bridges import BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid
 from topology_geo.geometry.rail import RailRibbon
 from topology_geo.geometry.road_network import NETWORK_INTERNAL
@@ -149,6 +150,7 @@ class SiteModel:
     tin: SiteTin | None = None
     buildings: list[BuildingSolid] = field(default_factory=list)
     roads: list[RoadRibbon] = field(default_factory=list)
+    bridges: list[BridgeRibbon] = field(default_factory=list)
     water_areas: list[WaterArea] = field(default_factory=list)
     waterways: list[WaterwayRibbon] = field(default_factory=list)
     rail: list[RailRibbon] = field(default_factory=list)
@@ -466,6 +468,38 @@ def build_site_ifc(
                 )
                 products.append(product)
             registry.append(("osm_roads", road.osm_id, product.GlobalId))
+
+    # Мосты, путепроводы (Шаг 2.5, п. 1-3) - IfcBridge нативно в IFC4X3, как
+    # IfcRoad выше; отметка полотна - уже готовая функция моста
+    # (`geometry.bridges.abutment_elevation_fn`, линейная интерполяция между
+    # устоями, не рельеф), обёрнутая тем же `pavement_elevation_fn` (тот же
+    # зазор от z-fighting, что у дороги/полосы).
+    for bridge in site_model.bridges:
+        if road_network_filter is not None and bridge.network != road_network_filter:
+            continue
+        polys = bridge.ribbon.geoms if bridge.ribbon.geom_type.startswith("Multi") else [bridge.ribbon]
+        for poly in polys:
+            mesh = flat_polygon_mesh(poly, pavement_elevation_fn(bridge.deck_elevation_fn))
+            bridge_pset = {"Статус": bridge.status}
+            if bridge.clearance_m is not None:
+                bridge_pset["Габарит_м"] = round(bridge.clearance_m, 3)
+            if is_ifc43:
+                product = _add_mesh_product(
+                    f, body_context, "IfcBridge", f"Мост {bridge.osm_id}", None,
+                    mesh, {"Pset_Мост": bridge_pset, "Pset_Контекст": {"Источник": "OSM (Шаг 1.1)"}},
+                )
+                spatial_children.append(product)
+            else:
+                product = _add_mesh_product(
+                    f, body_context, "IfcBuildingElementProxy", f"Мост {bridge.osm_id}", "USERDEFINED",
+                    mesh,
+                    {
+                        "Pset_Мост": bridge_pset,
+                        "Pset_Контекст": {"Заменяет_класс": "IfcBridge", "Источник": "OSM (Шаг 1.1)"},
+                    },
+                )
+                products.append(product)
+            registry.append(("osm_roads", bridge.osm_id, product.GlobalId))
 
     # Полосы (Шаг 2.3, п. 1, `geometry.streets`) - независимый от `roads`
     # слой ДЕТАЛИЗАЦИИ того же `highway=*`: несколько полос на один

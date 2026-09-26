@@ -10,6 +10,7 @@ import pytest
 from scipy.spatial import Delaunay
 from shapely.geometry import LineString, Polygon
 
+from topology_geo.geometry.bridges import STATUS_CALCULATED, STATUS_OFFICIAL, BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
 from topology_geo.geometry.rail import RailRibbon
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
@@ -605,3 +606,74 @@ def test_road_network_filter_roads_registry_does_not_include_other_network():
     registered_osm_ids = {osm_id for _, osm_id, _ in registry}
     assert 100 in registered_osm_ids
     assert 101 not in registered_osm_ids
+
+
+# --- мосты (Шаг 2.5, п. 1-3) ----------------------------------------------
+
+
+def _make_bridge(osm_id=50, status=STATUS_OFFICIAL, clearance_m=None, network=NETWORK_INTERNAL) -> BridgeRibbon:
+    axis = LineString([(-20, 0), (20, 0)])
+    return BridgeRibbon(
+        osm_id=osm_id,
+        ribbon=axis.buffer(4.0, cap_style="flat"),
+        axis=axis,
+        width_m=8.0,
+        width_confidence="умолчание",
+        surface="asphalt",
+        highway_class="secondary",
+        network=network,
+        deck_elevation_fn=lambda x, y: 100.0,
+        clearance_m=clearance_m,
+        status=status,
+    )
+
+
+def test_build_site_ifc_uses_native_ifcbridge_in_ifc43():
+    model = SiteModel(tin=_make_flat_tin(), bridges=[_make_bridge()])
+    f, registry = build_site_ifc("IFC4X3", model, BASE_POINT)
+    assert validate_model(f) == []
+    assert len(f.by_type("IfcBridge")) == 1
+    bridge_gid = next(gid for layer, osm_id, gid in registry if layer == "osm_roads" and osm_id == 50)
+    assert f.by_type("IfcBridge")[0].GlobalId == bridge_gid
+
+
+def test_build_site_ifc_uses_proxy_bridge_in_ifc4():
+    model = SiteModel(tin=_make_flat_tin(), bridges=[_make_bridge()])
+    f, _ = build_site_ifc("IFC4", model, BASE_POINT)
+    assert validate_model(f) == []
+    proxies = [e for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Мост")]
+    assert len(proxies) == 1
+
+
+def test_build_site_ifc_bridge_pset_reports_status_and_clearance():
+    model = SiteModel(tin=_make_flat_tin(), bridges=[_make_bridge(status=STATUS_CALCULATED, clearance_m=5.0)])
+    f, _ = build_site_ifc("IFC4", model, BASE_POINT)
+    psets = _psets_of_proxy_by_name(f, "Мост 50")
+    assert psets["Pset_Мост"] == {"Статус": STATUS_CALCULATED, "Габарит_м": 5.0}
+
+
+def test_build_site_ifc_bridge_pset_omits_clearance_when_not_checked():
+    model = SiteModel(tin=_make_flat_tin(), bridges=[_make_bridge(status=STATUS_OFFICIAL, clearance_m=None)])
+    f, _ = build_site_ifc("IFC4", model, BASE_POINT)
+    psets = _psets_of_proxy_by_name(f, "Мост 50")
+    assert psets["Pset_Мост"] == {"Статус": STATUS_OFFICIAL}
+
+
+def test_bridge_deck_elevation_includes_pavement_clearance():
+    """Полотно моста — та же обёртка `pavement_elevation_fn`, что и у
+    дороги/полосы (не отдельная логика зазора для мостов) - проверяется
+    напрямую в метрах Python, а не через сборку IFC (файл по умолчанию в
+    миллиметрах, см. docs/pavement.md)."""
+    bridge = _make_bridge()
+    deck_with_clearance = pavement_elevation_fn(bridge.deck_elevation_fn)
+    assert deck_with_clearance(0.0, 0.0) == pytest.approx(100.0 + PAVEMENT_CLEARANCE_M)
+
+
+def test_build_site_ifc_bridge_respects_road_network_filter():
+    model = SiteModel(
+        tin=_make_flat_tin(),
+        bridges=[_make_bridge(osm_id=50, network=NETWORK_BACKBONE), _make_bridge(osm_id=51, network=NETWORK_INTERNAL)],
+    )
+    f, _ = build_site_ifc("IFC4", model, BASE_POINT, road_network_filter=NETWORK_BACKBONE)
+    names = {e.Name for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Мост")}
+    assert names == {"Мост 50"}
