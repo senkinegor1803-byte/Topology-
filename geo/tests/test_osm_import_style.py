@@ -93,6 +93,15 @@ SAMPLE_OSM_XML = """\
   <node id="92" lat="58.0120" lon="56.2010" version="1"/>
   <node id="93" lat="58.0120" lon="56.2000" version="1"/>
 
+  <node id="140" lat="58.0130" lon="56.2060" version="1"/>
+  <node id="141" lat="58.0130" lon="56.2070" version="1"/>
+  <node id="142" lat="58.0135" lon="56.2070" version="1"/>
+  <node id="143" lat="58.0135" lon="56.2060" version="1"/>
+
+  <node id="150" lat="58.0140" lon="56.2000" version="1">
+    <tag k="railway" v="level_crossing"/>
+  </node>
+
   <way id="100" version="1">
     <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/>
     <tag k="building" v="yes"/>
@@ -135,6 +144,10 @@ SAMPLE_OSM_XML = """\
     <nd ref="90"/><nd ref="91"/><nd ref="92"/><nd ref="93"/><nd ref="90"/>
     <tag k="building:part" v="roof"/>
     <tag k="height" v="12"/>
+  </way>
+  <way id="130" version="1">
+    <nd ref="140"/><nd ref="141"/><nd ref="142"/><nd ref="143"/><nd ref="140"/>
+    <tag k="railway" v="platform"/>
   </way>
 
   <relation id="200" version="1">
@@ -290,6 +303,29 @@ def test_building_part_and_entrance_present(osm_test_db):
     assert len(entrances) == 1
     tags, geom_type = entrances[0]
     assert tags == {"entrance": "main"}
+    assert geom_type == "ST_Point"
+
+
+def test_railway_platform_and_crossing_present(osm_test_db):
+    """Шаг 2.6: платформа (`railway=platform`, замкнутый контур -> полигон,
+    отдельная таблица `osm_railway_platforms`) и переезд (`railway=
+    level_crossing`, точка-узел -> `osm_railway_crossings`)."""
+    platforms = _fetchall(
+        osm_test_db,
+        "SELECT tags, ST_GeometryType(geom) FROM osm_railway_platforms WHERE osm_id = 130",
+    )
+    assert len(platforms) == 1
+    tags, geom_type = platforms[0]
+    assert tags == {"railway": "platform"}
+    assert geom_type == "ST_Polygon"
+
+    crossings = _fetchall(
+        osm_test_db,
+        "SELECT tags, ST_GeometryType(geom) FROM osm_railway_crossings WHERE osm_id = 150",
+    )
+    assert len(crossings) == 1
+    tags, geom_type = crossings[0]
+    assert tags == {"railway": "level_crossing"}
     assert geom_type == "ST_Point"
 
 

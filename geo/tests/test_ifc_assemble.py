@@ -12,7 +12,7 @@ from shapely.geometry import LineString, Polygon
 
 from topology_geo.geometry.bridges import STATUS_CALCULATED, STATUS_OFFICIAL, BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
-from topology_geo.geometry.rail import RailRibbon
+from topology_geo.geometry.rail import CatenaryPole, LevelCrossing, PlatformArea, RailRibbon
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import RoadRibbon
 from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRibbon
@@ -185,6 +185,62 @@ def test_build_site_ifc_registers_one_global_id_per_source_object():
     assert len(set(global_ids)) == len(global_ids)  # уникальны
     all_global_ids_in_file = {p.GlobalId for p in f.by_type("IfcRoot")}
     assert set(global_ids) <= all_global_ids_in_file
+
+
+# --- Шаг 2.6: платформы, переезды, опоры контактной сети --------------------
+
+
+def _make_site_model_with_rail_extras() -> SiteModel:
+    model = _make_site_model()
+    platform = PlatformArea(osm_id=30, footprint=Polygon([(0, -25), (10, -25), (10, -22), (0, -22)]), height_m=0.3)
+    crossing = LevelCrossing(osm_id=31, x=-20.0, y=-20.0, crossing_type="level_crossing", size_m=4.0)
+    pole = CatenaryPole(osm_id=5, x=-30.0, y=-25.0, index=0)
+    return SiteModel(
+        tin=model.tin, buildings=model.buildings, roads=model.roads,
+        water_areas=model.water_areas, waterways=model.waterways, rail=model.rail,
+        platforms=[platform], level_crossings=[crossing], catenary_poles=[pole],
+        trees=model.trees,
+    )
+
+
+def test_build_site_ifc_includes_platform_crossing_and_pole():
+    f, registry = build_site_ifc("IFC4", _make_site_model_with_rail_extras(), BASE_POINT)
+    assert validate_model(f) == []
+
+    names = [e.Name for e in f.by_type("IfcBuildingElementProxy")]
+    assert any((n or "").startswith("Платформа") for n in names)
+    assert any((n or "").startswith("Переезд") for n in names)
+    assert any((n or "").startswith("Опора КС") for n in names)
+
+    layers = {layer for layer, _, _ in registry}
+    assert "osm_railway_platforms" in layers
+    assert "osm_railway_crossings" in layers
+    # Опоры без естественного уникального osm_id (несколько на один путь,
+    # как разметка) - в реестр GlobalId не попадают, см. `ifc/assemble.py`.
+    assert "osm_railway_poles" not in layers
+
+
+def test_platform_pset_reports_type_and_height():
+    model = _make_site_model_with_rail_extras()
+    f, _ = build_site_ifc("IFC4", model, BASE_POINT)
+    pset = _psets_of_proxy_by_name(f, "Платформа 30")["Pset_ЖД"]
+    assert pset["Тип"] == "платформа"
+    assert pset["Высота_м"] == pytest.approx(0.3)
+
+
+def test_road_network_filter_excludes_rail_extras():
+    """Платформы/переезды/опоры - не дорожная сеть, исключены из
+    roads_backbone/roads_internal (тот же приём, что и rail/trees, Шаг 2.4)."""
+    f, registry = build_site_ifc(
+        "IFC4", _make_site_model_with_rail_extras(), BASE_POINT, road_network_filter=NETWORK_INTERNAL
+    )
+    names = [e.Name for e in f.by_type("IfcBuildingElementProxy")]
+    assert not any((n or "").startswith("Платформа") for n in names)
+    assert not any((n or "").startswith("Переезд") for n in names)
+    assert not any((n or "").startswith("Опора КС") for n in names)
+    layers = {layer for layer, _, _ in registry}
+    assert "osm_railway_platforms" not in layers
+    assert "osm_railway_crossings" not in layers
 
 
 def _psets_of(model, name_predicate) -> dict:

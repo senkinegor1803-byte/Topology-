@@ -21,6 +21,15 @@
 -- `building:part` в этом стиле не проверяется на `building` (см.
 -- `process_way`). `entrance=*` (Шаг 2.2, п. 3) — точки, `osm_entrances`.
 --
+-- `osm_railway_platforms`/`osm_railway_crossings` (Шаг 2.6) — платформы
+-- (`railway=platform`, полигон если контур замкнут, иначе линия вдоль пути —
+-- оба варианта встречаются в OSM) и переезды/пешеходные переходы через пути
+-- (`railway=level_crossing`/`crossing`, точки-узлы). Выделены в отдельные
+-- таблицы, а не в общую `osm_railways` (линии путей) — та определена с
+-- фиксированным типом геометрии `linestring`, полигон платформы в неё не
+-- ложится, да и семантически это разные объекты (путь vs платформа vs
+-- переезд), которым позже (`topology_geo.selection`) нужны разные обработчики.
+--
 -- `osm_roads.nodes` (Шаг 2.3, п. 1) — доп. колонка с массивом ID узлов way
 -- (`object.nodes`, тот же порядок, что и вершины `geom`) поверх обычного
 -- набора tags/geom. Нужна, чтобы позже (`topology_geo.osm.raw_roads`) при
@@ -52,6 +61,8 @@ local tables = {
     building_parts = def_table('osm_building_parts', 'geometry'), -- building:part=*, полигоны (Шаг 2.2, п. 1)
     roads = def_table('osm_roads', 'linestring', { { column = 'nodes', type = 'jsonb' } }),
     railways = def_table('osm_railways', 'linestring'),
+    railway_platforms = def_table('osm_railway_platforms', 'geometry'), -- railway=platform, полигон или линия (Шаг 2.6)
+    railway_crossings = def_table('osm_railway_crossings', 'point'),    -- railway=level_crossing/crossing, точки (Шаг 2.6)
     water_areas = def_table('osm_water_areas', 'geometry'),    -- полигоны/мультиполигоны
     waterways = def_table('osm_waterways', 'linestring'),
     vegetation = def_table('osm_vegetation', 'geometry'),      -- точки (дерево) + полигоны (лес/газон)
@@ -97,6 +108,11 @@ function osm2pgsql.process_node(object)
         return
     end
 
+    if tags.railway == 'level_crossing' or tags.railway == 'crossing' then
+        tables.railway_crossings:insert({ tags = tags, geom = object:as_point() })
+        return
+    end
+
     if has_any(tags, { 'amenity', 'leisure', 'barrier', 'highway' })
         and (tags.amenity == 'bench' or tags.amenity == 'waste_basket'
              or tags.leisure == 'playground'
@@ -122,6 +138,19 @@ function osm2pgsql.process_way(object)
 
     if tags.highway then
         tables.roads:insert({ tags = tags, nodes = object.nodes, geom = object:as_linestring() })
+        return
+    end
+
+    if tags.railway == 'platform' then
+        -- Платформа может быть замкнутым контуром (полигон) или одной линией
+        -- вдоль пути - `insert_way_geom(as_area=true)` молча пропускает
+        -- незамкнутые way, здесь оба варианта нужны, поэтому не переиспользуем
+        -- его как есть.
+        if object.is_closed then
+            tables.railway_platforms:insert({ tags = tags, geom = object:as_polygon() })
+        else
+            tables.railway_platforms:insert({ tags = tags, geom = object:as_linestring() })
+        end
         return
     end
 

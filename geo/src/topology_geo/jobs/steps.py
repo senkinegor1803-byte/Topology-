@@ -19,7 +19,12 @@ from affine import Affine
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.geometry.bridges import build_bridge_ribbons
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
-from topology_geo.geometry.rail import build_rail_ribbons
+from topology_geo.geometry.rail import (
+    build_level_crossings,
+    build_platform_areas,
+    build_rail_ribbons,
+    place_catenary_poles,
+)
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import build_road_ribbons
 from topology_geo.geometry.streets import StreetNetwork, build_lane_network, is_osm2streets_available
@@ -159,6 +164,13 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     классификации (`build_site_ifc`, `road_network_filter`), каркасная
     помечена нередактируемой (`Pset_Дорога/Полоса.Редактируемый=false`).
 
+    Ж/д и трамвай (Шаг 2.6, `geometry.rail`): ширина насыпи `rail` теперь
+    считается по числу путей и колее (`build_rail_ribbons`), плюс платформы
+    (`build_platform_areas`), переезды (`build_level_crossings` — по осям
+    уже построенных путей `rail`) и упрощённые опоры контактной сети
+    (`place_catenary_poles`). Шпалы/рельсы индивидуальной геометрией в
+    ближнем кольце в этом проходе не строятся, см. `docs/rail.md`.
+
     Мосты (Шаг 2.5, п. 1-3, `geometry.bridges.build_bridge_ribbons`) строятся
     ПОСЛЕ `roads`/`rail` — габарит проверяется по их осям (`RoadRibbon.axis`/
     `RailRibbon.axis`)."""
@@ -183,6 +195,9 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     water_areas = build_water_areas(dataset.features, tin.interpolate_z)
     waterways = build_waterway_ribbons(dataset.features, tin.interpolate_z)
     rail = build_rail_ribbons(dataset.features)
+    platforms = build_platform_areas(dataset.features)
+    level_crossings = build_level_crossings(dataset.features, rail)
+    catenary_poles = place_catenary_poles(dataset.features)
     trees = build_individual_trees(dataset.features) + scatter_forest_trees(dataset.features)
 
     # Мосты, путепроводы (Шаг 2.5, п. 1-3) - габарит проверяется по осям уже
@@ -207,7 +222,9 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
 
     site_model = SiteModel(
         tin=tin, buildings=buildings, roads=roads, bridges=bridges,
-        water_areas=water_areas, waterways=waterways, rail=rail, trees=trees,
+        water_areas=water_areas, waterways=waterways, rail=rail,
+        platforms=platforms, level_crossings=level_crossings, catenary_poles=catenary_poles,
+        trees=trees,
         lanes=street_network.lanes, intersections=street_network.intersections, markings=street_network.markings,
     )
     base_point = BasePoint(
@@ -263,6 +280,9 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         "water_areas": len(water_areas),
         "waterways": len(waterways),
         "rail": len(rail),
+        "platforms": len(platforms),
+        "level_crossings": len(level_crossings),
+        "catenary_poles": len(catenary_poles),
         "trees": len(trees),
         "lanes": len(street_network.lanes),
         "intersections": len(street_network.intersections),

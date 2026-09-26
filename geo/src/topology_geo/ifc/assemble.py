@@ -31,11 +31,18 @@ import ifcopenshell.api.spatial
 import ifcopenshell.api.unit
 import mapbox_earcut as earcut
 import numpy as np
-from shapely.geometry import Point
+from shapely.geometry import Point, box
 
 from topology_geo.geometry.bridges import BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid
-from topology_geo.geometry.rail import RailRibbon
+from topology_geo.geometry.rail import (
+    POLE_HEIGHT_M,
+    POLE_RADIUS_M,
+    CatenaryPole,
+    LevelCrossing,
+    PlatformArea,
+    RailRibbon,
+)
 from topology_geo.geometry.road_network import NETWORK_INTERNAL
 from topology_geo.geometry.roads import RoadRibbon
 from topology_geo.geometry.roofs import (
@@ -154,6 +161,9 @@ class SiteModel:
     water_areas: list[WaterArea] = field(default_factory=list)
     waterways: list[WaterwayRibbon] = field(default_factory=list)
     rail: list[RailRibbon] = field(default_factory=list)
+    platforms: list[PlatformArea] = field(default_factory=list)
+    level_crossings: list[LevelCrossing] = field(default_factory=list)
+    catenary_poles: list[CatenaryPole] = field(default_factory=list)
     trees: list[TreePoint] = field(default_factory=list)
     lanes: list[LaneRibbon] = field(default_factory=list)
     intersections: list[IntersectionArea] = field(default_factory=list)
@@ -611,14 +621,78 @@ def build_site_ifc(
 
     for rail in (site_model.rail if road_network_filter is None else []):
         polys = rail.ballast.geoms if rail.ballast.geom_type.startswith("Multi") else [rail.ballast]
+        rail_pset = {
+            "Тип": rail.rail_type,
+            "Число_путей": rail.tracks,
+            "Колея_м": round(rail.gauge_m, 3),
+            "Ширина_насыпи_м": round(rail.width_m, 3),
+            "Источник_ширины": rail.width_confidence,
+        }
         for poly in polys:
             mesh = flat_polygon_mesh(poly, _terrain_elevation)
             product = _add_mesh_product(
                 f, body_context, "IfcBuildingElementProxy", f"Ж/д {rail.osm_id}", "USERDEFINED",
-                mesh, {"Pset_ЖД": {"Тип": rail.rail_type}, "Pset_Контекст": {"Заменяет_класс": "IfcRail"}},
+                mesh, {"Pset_ЖД": rail_pset, "Pset_Контекст": {"Заменяет_класс": "IfcRail"}},
             )
             products.append(product)
             registry.append(("osm_railways", rail.osm_id, product.GlobalId))
+
+    # Платформы (Шаг 2.6, `railway=platform`) - приподняты над рельефом на
+    # `PlatformArea.height_m` (упрощённо, без деления на низкую/высокую).
+    for platform in (site_model.platforms if road_network_filter is None else []):
+        polys = platform.footprint.geoms if platform.footprint.geom_type.startswith("Multi") else [platform.footprint]
+
+        def _platform_elevation(x: float, y: float, _h: float = platform.height_m) -> float | None:
+            z = _terrain_elevation(x, y)
+            return None if z is None else z + _h
+
+        for poly in polys:
+            mesh = flat_polygon_mesh(poly, _platform_elevation)
+            product = _add_mesh_product(
+                f, body_context, "IfcBuildingElementProxy", f"Платформа {platform.osm_id}", "USERDEFINED",
+                mesh,
+                {
+                    "Pset_ЖД": {"Тип": "платформа", "Высота_м": round(platform.height_m, 3)},
+                    "Pset_Контекст": {"Заменяет_класс": "IfcBuiltElement"},
+                },
+            )
+            products.append(product)
+            registry.append(("osm_railway_platforms", platform.osm_id, product.GlobalId))
+
+    # Переезды/пешеходные переходы через пути (Шаг 2.6) - упрощённое
+    # квадратное пятно разметки на уровне рельефа (см. `geometry.rail.
+    # build_level_crossings`, ширина = ширина насыпи ближайшего пути).
+    for crossing in (site_model.level_crossings if road_network_filter is None else []):
+        half = crossing.size_m / 2
+        square = box(crossing.x - half, crossing.y - half, crossing.x + half, crossing.y + half)
+        mesh = flat_polygon_mesh(square, _terrain_elevation)
+        product = _add_mesh_product(
+            f, body_context, "IfcBuildingElementProxy", f"Переезд {crossing.osm_id}", "USERDEFINED",
+            mesh,
+            {
+                "Pset_ЖД": {"Тип": crossing.crossing_type, "Сторона_пятна_м": round(crossing.size_m, 3)},
+                "Pset_Контекст": {"Источник": "упрощённая разметка (Шаг 2.6)"},
+            },
+        )
+        products.append(product)
+        registry.append(("osm_railway_crossings", crossing.osm_id, product.GlobalId))
+
+    # Опоры контактной сети (Шаг 2.6) - упрощённая регулярная расстановка,
+    # без естественного уникального osm_id (несколько опор на один way пути,
+    # как штрихи разметки выше) - в реестр GlobalId не попадают.
+    for pole in (site_model.catenary_poles if road_network_filter is None else []):
+        z = _terrain_elevation(pole.x, pole.y) or 0.0
+        verts, faces = mesh_cylinder(POLE_RADIUS_M, POLE_HEIGHT_M, segments=8)
+        verts = [(x + pole.x, y + pole.y, zz + z) for x, y, zz in verts]
+        product = _add_mesh_product(
+            f, body_context, "IfcBuildingElementProxy", f"Опора КС {pole.osm_id}-{pole.index}", "USERDEFINED",
+            (verts, faces),
+            {
+                "Pset_ЖД": {"Тип": "опора контактной сети"},
+                "Pset_Контекст": {"Заменяет_класс": "IfcColumn"},
+            },
+        )
+        products.append(product)
 
     for i, tree in enumerate(site_model.trees if road_network_filter is None else []):
         z = _terrain_elevation(tree.x, tree.y) or 0.0

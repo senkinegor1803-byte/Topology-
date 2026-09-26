@@ -11,6 +11,8 @@ TABLES: tuple[str, ...] = (
     "osm_building_parts",
     "osm_roads",
     "osm_railways",
+    "osm_railway_platforms",
+    "osm_railway_crossings",
     "osm_water_areas",
     "osm_waterways",
     "osm_vegetation",
