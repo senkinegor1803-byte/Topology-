@@ -107,7 +107,7 @@ def test_waterway_ribbon_area_matches_length_times_width():
     length = 50.0
     width = 3.0
     feature = _feature("osm_waterways", LineString([(0, 0), (length, 0)]))
-    ribbons = build_waterway_ribbons([feature], width_m=width)
+    ribbons = build_waterway_ribbons([feature], _flat_terrain(0.0), width_m=width)
     assert len(ribbons) == 1
     assert ribbons[0].ribbon.area == pytest.approx(length * width, rel=1e-6)
 
@@ -115,6 +115,73 @@ def test_waterway_ribbon_area_matches_length_times_width():
 def test_build_water_areas_ignores_non_water_layers():
     feature = _feature("osm_roads", LineString([(0, 0), (10, 0)]))
     assert build_water_areas([feature], _flat_terrain(0.0)) == []
+
+
+def test_build_water_areas_smooths_jagged_boundary():
+    """Реки/озёра в OSM часто оцифрованы ломаной с резкими углами — контур
+    должен быть реально сглажен (метод Чайкина), не просто пропущен как есть."""
+    poly = Polygon([(0, 0), (5, 0), (5, 5), (2.5, 1.0), (0, 5)])  # острый "шип" внутрь на (2.5, 1.0)
+    feature = _feature("osm_water_areas", poly)
+    areas = build_water_areas([feature], _flat_terrain(0.0))
+    smoothed = areas[0].polygon
+
+    assert smoothed.is_valid
+    assert len(list(smoothed.exterior.coords)) > len(list(poly.exterior.coords))  # срезание углов добавляет точки
+    assert smoothed.area == pytest.approx(poly.area, rel=0.3)  # форма не искажена радикально
+
+
+def test_water_area_level_varies_along_slope_for_elongated_shape_not_flat():
+    """Вытянутый (не компактный) водоём на уклоне — уровень воды меняется
+    вдоль длины, а не единая плоская отметка (единая «рыла бы траншею» на
+    одном конце, см. докстринг модуля/`_long_axis_line`)."""
+    def terrain(x, y):
+        return 100.0 + 0.1 * x
+
+    # длина 200, ширина 5 - соотношение сторон явно выше WATER_AREA_ELONGATION_RATIO
+    poly = Polygon([(0, -2.5), (200, -2.5), (200, 2.5), (0, 2.5)])
+    feature = _feature("osm_water_areas", poly)
+    water = build_water_areas([feature], terrain)[0]
+
+    assert water.level_fn(5.0, 0.0) == pytest.approx(terrain(5.0, 0.0), abs=1e-6)
+    assert water.level_fn(195.0, 0.0) == pytest.approx(terrain(195.0, 0.0), abs=1e-6)
+    assert water.level_fn(195.0, 0.0) > water.level_fn(5.0, 0.0)  # следует уклону, не единой отметке
+
+    # сечение, перпендикулярное длине (один и тот же x, разные "берега") -
+    # одна и та же отметка, как и должно быть физически
+    assert water.level_fn(100.0, -2.4) == pytest.approx(water.level_fn(100.0, 2.4), abs=1e-6)
+
+
+def test_waterway_ribbon_smoothing_shortens_sharp_zigzag():
+    """Срезание углов методом Чайкина всегда укорачивает путь на резких
+    поворотах — реальная, проверяемая геометрическая проверка того, что
+    сглаживание действительно произошло, а не просто скопировало вход."""
+    line = LineString([(0, 0), (10, 0), (10, 10), (0, 10), (0, 20)])
+    width = 2.0
+    feature = _feature("osm_waterways", line, osm_id=7)
+    ribbons = build_waterway_ribbons([feature], _flat_terrain(0.0), width_m=width)
+    ribbon = ribbons[0].ribbon
+
+    unsmoothed_ribbon = line.buffer(width / 2, cap_style="flat")
+    assert ribbon.area < unsmoothed_ribbon.area
+
+    # концы НЕ сглаживаются (иначе слияние рек в одном узле разошлось бы) -
+    # плоский торец буфера проходит РОВНО через конец линии (расстояние 0);
+    # если бы конец сдвинулся сглаживанием, точка не лежала бы на границе.
+    assert ribbon.boundary.distance(Point(0, 0)) == pytest.approx(0.0, abs=1e-9)
+    assert ribbon.boundary.distance(Point(0, 20)) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_waterway_ribbon_level_follows_line_profile():
+    def terrain(x, y):
+        return 100.0 + 0.2 * x
+
+    line = LineString([(0, 0), (100, 0)])
+    feature = _feature("osm_waterways", line, osm_id=9)
+    ribbon = build_waterway_ribbons([feature], terrain, width_m=2.0)[0]
+
+    assert ribbon.level_fn(10.0, 0.0) == pytest.approx(terrain(10.0, 0.0), abs=1e-6)
+    assert ribbon.level_fn(90.0, 0.0) == pytest.approx(terrain(90.0, 0.0), abs=1e-6)
+    assert ribbon.level_fn(10.0, 0.0) != ribbon.level_fn(90.0, 0.0)
 
 
 # --- rail ---------------------------------------------------------------

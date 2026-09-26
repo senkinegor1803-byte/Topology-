@@ -57,12 +57,13 @@ API (`radius_m` 500-3000 м, `api/schemas.py`): на 1,5 км (~7 млн точ�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 import shapely
 from scipy.ndimage import uniform_filter
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, KDTree
 from shapely.geometry import LineString, Point
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
@@ -176,19 +177,31 @@ class SiteTin:
     vertices: np.ndarray  # (N, 3): x, y, z в локальных координатах участка
     triangles: np.ndarray  # (M, 3) индексы вершин
     _delaunay: Delaunay
+    _kdtree: KDTree | None = field(default=None, repr=False, compare=False)
 
-    def interpolate_z(self, x: float, y: float) -> float | None:
-        """Барицентрическая интерполяция высоты в точке (x, y). None, если
-        точка вне выпуклой оболочки TIN."""
+    def interpolate_z(self, x: float, y: float) -> float:
+        """Барицентрическая интерполяция высоты в точке (x, y). Вне выпуклой
+        оболочки TIN (например, угол ленты полосы у самой границы участка,
+        буфер бордюра чуть шире врезанного в TIN коридора дороги) —
+        экстраполяция отметкой БЛИЖАЙШЕЙ вершины TIN, а не абсолютный 0:
+        последнее давало реальный, воспроизведённый баг — угол дорожного
+        покрытия на настоящей отметке рельефа (например, 150 м) рисовался на
+        Z=0, то есть «падал под землю» на всю высоту рельефа, а не просто
+        на сантиметры (см. `docs/pavement.md`, найдено при добавлении
+        предохранителя «дорога не уходит под рельеф»)."""
         simplex = self._delaunay.find_simplex(np.array([[x, y]]))[0]
-        if simplex < 0:
-            return None
-        tri = self.triangles[simplex]
-        transform = self._delaunay.transform[simplex]
-        delta = np.array([x, y]) - transform[2]
-        bary = transform[:2].dot(delta)
-        weights = np.array([bary[0], bary[1], 1 - bary.sum()])
-        return float(np.dot(weights, self.vertices[tri, 2]))
+        if simplex >= 0:
+            tri = self.triangles[simplex]
+            transform = self._delaunay.transform[simplex]
+            delta = np.array([x, y]) - transform[2]
+            bary = transform[:2].dot(delta)
+            weights = np.array([bary[0], bary[1], 1 - bary.sum()])
+            return float(np.dot(weights, self.vertices[tri, 2]))
+
+        if self._kdtree is None:
+            self._kdtree = KDTree(self.vertices[:, :2])
+        _, nearest_idx = self._kdtree.query([x, y])
+        return float(self.vertices[nearest_idx, 2])
 
 
 def _dedupe_points(points: list[TinPoint], tol: float = 0.01) -> list[TinPoint]:
@@ -344,6 +357,31 @@ def _smoothed_profile(line: LineString, elevation_fn, *, step: float, window_m: 
         p = line.interpolate(d)
         result.append((p.x, p.y, float(z)))
     return result
+
+
+def build_profile_elevation_fn(
+    line: LineString, elevation_fn, *, step: float, window_m: float
+) -> Callable[[float, float], float]:
+    """Функция отметки по точке `(x, y)`, основанная на сглаженном продольном
+    профиле вдоль `line` (`_smoothed_profile`) — та же техника, что и у
+    отметки дороги (Шаг 1.5, п. 2), применённая к реке/водоёму
+    (`geometry/water.py`): в сечении, перпендикулярном течению, поверхность
+    воды физически плоская (одна и та же отметка на обоих берегах), а вдоль
+    течения меняется гладко — не единым минимумом по всему контуру сразу
+    (последнее «роет траншею» для вытянутого водоёма/реки на склоне, см.
+    `docs/water.md`). Точка проецируется на `line`, отметка — линейная
+    интерполяция сглаженного профиля в этой проекции."""
+    profile = _smoothed_profile(line, elevation_fn, step=step, window_m=window_m)
+    distances = np.array([line.project(Point(x, y)) for x, y, _ in profile])
+    zs = np.array([z for _, _, z in profile])
+    order = np.argsort(distances)
+    distances, zs = distances[order], zs[order]
+
+    def level_fn(x: float, y: float) -> float:
+        d = line.project(Point(x, y))
+        return float(np.interp(d, distances, zs))
+
+    return level_fn
 
 
 def build_site_tin(
@@ -502,8 +540,6 @@ def max_deviation_along_line(tin: SiteTin, line: LineString, target_z_fn, *, ste
     for d in np.linspace(0, length, n + 1):
         p = line.interpolate(d)
         tin_z = tin.interpolate_z(p.x, p.y)
-        if tin_z is None:
-            continue
         target_z = target_z_fn(p.x, p.y)
         if target_z is None:
             continue

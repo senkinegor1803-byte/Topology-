@@ -171,7 +171,7 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     buildings = extrude_buildings(dataset.features, tin.interpolate_z, NullOvertureSource())
     roads = build_road_ribbons(dataset.features)
     water_areas = build_water_areas(dataset.features, tin.interpolate_z)
-    waterways = build_waterway_ribbons(dataset.features)
+    waterways = build_waterway_ribbons(dataset.features, tin.interpolate_z)
     rail = build_rail_ribbons(dataset.features)
     trees = build_individual_trees(dataset.features) + scatter_forest_trees(dataset.features)
 
@@ -191,7 +191,7 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     )
     base_point = BasePoint(
         lon=job.center_lon, lat=job.center_lat, zone=zone, x=center_x, y=center_y,
-        height=tin.interpolate_z(0.0, 0.0) or 0.0,
+        height=tin.interpolate_z(0.0, 0.0),
     )
 
     ensure_ifc_registry_schema(conn)

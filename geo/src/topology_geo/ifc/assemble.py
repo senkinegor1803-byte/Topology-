@@ -52,6 +52,40 @@ Face = tuple[int, ...]
 ElevationFn = Callable[[float, float], float | None]
 GlobalIdRegistry = list[tuple[str, int, str]]  # (layer, osm_id, GlobalId)
 
+# Дорожное покрытие (лента дороги, полосы/тротуары, площадки перекрёстков)
+# обязано быть верхним полотном над рельефом, не наравне с ним: рельеф в этих
+# точках уже несёт ТОЧНУЮ отметку земляного полотна (дорога врезана в TIN,
+# Шаг 1.5), а сверху лежит конструктив покрытия — поднимаем меш покрытия над
+# этой отметкой на толщину, а не рисуем его вровень с землёй (вровень —
+# гарантированный z-fighting в вебвьюере и, при малейшем расхождении сеток
+# ленты/TIN между исходными вершинами, видимое проваливание полотна под
+# рельеф). Разметка — тонкий слой КРАСКИ НА покрытии, ещё выше него.
+PAVEMENT_CLEARANCE_M = 0.03
+MARKING_CLEARANCE_M = 0.005
+
+
+def pavement_elevation_fn(terrain_elevation_fn: ElevationFn) -> ElevationFn:
+    """Обёртка над отметкой рельефа: покрытие всегда на `PAVEMENT_CLEARANCE_M`
+    выше земли (лента дороги, полоса/тротуар, площадка перекрёстка)."""
+
+    def _fn(x: float, y: float) -> float | None:
+        z = terrain_elevation_fn(x, y)
+        return None if z is None else z + PAVEMENT_CLEARANCE_M
+
+    return _fn
+
+
+def marking_elevation_fn(terrain_elevation_fn: ElevationFn) -> ElevationFn:
+    """Обёртка над отметкой рельефа: разметка на `MARKING_CLEARANCE_M` выше
+    самого покрытия (`pavement_elevation_fn`), а не наравне с ним."""
+    pavement_fn = pavement_elevation_fn(terrain_elevation_fn)
+
+    def _fn(x: float, y: float) -> float | None:
+        z = pavement_fn(x, y)
+        return None if z is None else z + MARKING_CLEARANCE_M
+
+    return _fn
+
 
 @dataclass(frozen=True)
 class SiteModel:
@@ -319,6 +353,9 @@ def build_site_ifc(
     def _terrain_elevation(x: float, y: float) -> float | None:
         return site_model.tin.interpolate_z(x, y) if site_model.tin is not None else 0.0
 
+    _pavement_elevation = pavement_elevation_fn(_terrain_elevation)
+    _marking_elevation = marking_elevation_fn(_terrain_elevation)
+
     # IfcRoad — нативно в IFC4X3 (IfcSpatialElement, роднится с сайтом через
     # aggregate.assign_object, как в Шаге 0.2); в IFC4 схема его не знает,
     # используется прокси IfcBuildingElementProxy (обычный IfcElement,
@@ -327,7 +364,7 @@ def build_site_ifc(
     for road in site_model.roads:
         polys = road.ribbon.geoms if road.ribbon.geom_type.startswith("Multi") else [road.ribbon]
         for poly in polys:
-            mesh = flat_polygon_mesh(poly, _terrain_elevation)
+            mesh = flat_polygon_mesh(poly, _pavement_elevation)
             road_pset = {
                 "Класс": road.highway_class,
                 "Покрытие": road.surface or "",
@@ -358,7 +395,7 @@ def build_site_ifc(
     # только последний GlobalId на такой `osm_id` - тот же принятый компромисс
     # (реестр рассчитан на 1 запись на исходный объект, не на под-объекты).
     for lane in site_model.lanes:
-        mesh = flat_polygon_mesh(lane.polygon, _terrain_elevation)
+        mesh = flat_polygon_mesh(lane.polygon, _pavement_elevation)
         lane_name = "Полоса " + "+".join(str(i) for i in lane.osm_way_ids)
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", lane_name, "USERDEFINED",
@@ -376,7 +413,7 @@ def build_site_ifc(
             registry.append(("osm_roads", osm_id, product.GlobalId))
 
     for intersection in site_model.intersections:
-        mesh = flat_polygon_mesh(intersection.polygon, _terrain_elevation)
+        mesh = flat_polygon_mesh(intersection.polygon, _pavement_elevation)
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", f"Перекрёсток ({intersection.kind})", "USERDEFINED",
             mesh,
@@ -397,7 +434,7 @@ def build_site_ifc(
     for marking in site_model.markings:
         markings_by_kind.setdefault(marking.kind, []).append(marking)
     for kind, markings in markings_by_kind.items():
-        mesh = _combine_meshes([flat_polygon_mesh(m.polygon, _terrain_elevation) for m in markings])
+        mesh = _combine_meshes([flat_polygon_mesh(m.polygon, _marking_elevation) for m in markings])
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", f"Разметка ({kind})", "USERDEFINED",
             mesh,
@@ -412,7 +449,11 @@ def build_site_ifc(
         # как перекрёстки выше.
 
     for water in site_model.water_areas:
-        mesh = flat_polygon_mesh(water.polygon, lambda x, y, z=water.level_z: z)
+        # `level_fn` — реальный (не единый по всему контуру) уровень воды,
+        # см. `geometry.water` (нужен для вытянутых/полномасштабных водоёмов
+        # на склоне); `level_z` остаётся как представительное число для Pset.
+        water_elevation = water.level_fn if water.level_fn is not None else (lambda x, y, z=water.level_z: z)
+        mesh = flat_polygon_mesh(water.polygon, water_elevation)
         product = _add_mesh_product(
             f, body_context, "IfcGeographicElement", f"Водоём {water.osm_id}", "USERDEFINED",
             mesh, {"Pset_Вода": {"Тип": "водоём", "Отметка_уреза_м": water.level_z}},
@@ -421,9 +462,10 @@ def build_site_ifc(
         registry.append(("osm_water_areas", water.osm_id, product.GlobalId))
 
     for waterway in site_model.waterways:
+        waterway_elevation = waterway.level_fn if waterway.level_fn is not None else _terrain_elevation
         polys = waterway.ribbon.geoms if waterway.ribbon.geom_type.startswith("Multi") else [waterway.ribbon]
         for poly in polys:
-            mesh = flat_polygon_mesh(poly, _terrain_elevation)
+            mesh = flat_polygon_mesh(poly, waterway_elevation)
             product = _add_mesh_product(
                 f, body_context, "IfcGeographicElement", f"Водоток {waterway.osm_id}", "USERDEFINED",
                 mesh, {"Pset_Вода": {"Тип": "водоток", "Ширина_м": waterway.width_m}},

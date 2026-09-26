@@ -17,12 +17,16 @@ from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRib
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.ifc.assemble import (
+    MARKING_CLEARANCE_M,
+    PAVEMENT_CLEARANCE_M,
     BasePoint,
     SiteModel,
     build_site_ifc,
     extrude_polygon_mesh,
     flat_polygon_mesh,
+    marking_elevation_fn,
     mesh_cylinder,
+    pavement_elevation_fn,
     triangulate_polygon,
 )
 from topology_geo.ifc.generate_test_ifc import validate_model
@@ -360,3 +364,60 @@ def test_build_site_ifc_terrain_matches_tin_triangle_count():
     terrain = f.by_type("IfcGeographicElement")
     assert len(terrain) == 1
     assert terrain[0].PredefinedType == "TERRAIN"
+
+
+def _mesh_coords(product) -> list[tuple[float, float, float]]:
+    rep_item = product.Representation.Representations[0].Items[0]
+    return [tuple(c) for c in rep_item.Coordinates.CoordList]
+
+
+def test_pavement_elevation_fn_lifts_terrain_by_clearance():
+    """Дорожное покрытие — обязательное требование проекта — всегда СТРОГО
+    выше земли, не вровень с ней: вровень означало бы гарантированный
+    z-fighting в вебвьюере и, при малейшем расхождении сеток ленты/TIN,
+    видимое проваливание полотна под рельеф."""
+    terrain = lambda x, y: 100.0 + 0.01 * x
+    pavement = pavement_elevation_fn(terrain)
+    for x, y in [(0.0, 0.0), (12.3, -4.0), (-50.0, 50.0)]:
+        assert pavement(x, y) == pytest.approx(terrain(x, y) + PAVEMENT_CLEARANCE_M)
+
+
+def test_pavement_elevation_fn_propagates_none():
+    pavement = pavement_elevation_fn(lambda x, y: None)
+    assert pavement(0.0, 0.0) is None
+
+
+def test_marking_elevation_fn_sits_above_pavement():
+    """Разметка — тонкий слой краски НА покрытии, ещё выше него — иначе линия
+    разметки зрительно тонула бы в асфальте, поднятом над рельефом."""
+    terrain = lambda x, y: 100.0
+    marking = marking_elevation_fn(terrain)
+    assert marking(0.0, 0.0) == pytest.approx(100.0 + PAVEMENT_CLEARANCE_M + MARKING_CLEARANCE_M)
+
+
+def test_build_site_ifc_road_lane_and_marking_are_above_terrain_end_to_end():
+    """Сквозная проверка через реальную сборку IFC (не только логику функций
+    выше): дорога и разметка попадают в файл в правильном относительном
+    порядке (разметка выше покрытия). Ровный (без уклона) TIN — иначе
+    сравнение глобальных min/max между двумя разными по площади объектами
+    путал бы уклон рельефа с самим сравниваемым подъёмом. Координаты в файле
+    — в его собственных единицах (мм по умолчанию
+    `ifcopenshell.api.project.create_file`), поэтому сравниваем отношения
+    Z-координат внутри файла, а не абсолютные метры."""
+    tin = _make_flat_tin(n=2)
+    tin.vertices[:, 2] = 100.0  # без уклона — см. докстринг
+    road = RoadRibbon(
+        osm_id=2, ribbon=LineString([(-40, 0), (40, 0)]).buffer(3.0, cap_style="flat"),
+        width_m=6.0, width_confidence="умолчание", surface="asphalt", highway_class="residential",
+    )
+    marking = LaneMarking(kind="center line", polygon=Polygon([(-2, -0.05), (2, -0.05), (2, 0.05), (-2, 0.05)]))
+    model = SiteModel(tin=tin, roads=[road], markings=[marking])
+    f, _ = build_site_ifc("IFC4", model, BASE_POINT)
+    assert validate_model(f) == []
+
+    road_product = next(e for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Дорога"))
+    marking_product = next(e for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Разметка"))
+    road_z = [c[2] for c in _mesh_coords(road_product)]
+    marking_z = [c[2] for c in _mesh_coords(marking_product)]
+
+    assert min(marking_z) > max(road_z)  # разметка строго выше покрытия дороги, а не вровень с ним

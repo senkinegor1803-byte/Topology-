@@ -19,6 +19,7 @@ from shapely.geometry import LineString, Polygon
 
 from topology_geo.relief.service import Grid
 from topology_geo.relief.tin import (
+    build_profile_elevation_fn,
     build_site_tin,
     find_degenerate_triangles,
     max_deviation_along_line,
@@ -239,3 +240,47 @@ def test_multi_structural_smoothing_reduces_background_spike_but_keeps_flat_pads
 
     building_corner_z = tin.interpolate_z(-5.0, -5.0)
     assert building_corner_z == pytest.approx(100.0, abs=1e-9)  # площадка не сглажена — точная
+
+
+def test_interpolate_z_outside_hull_extrapolates_nearest_vertex_not_zero(planar_site_features):
+    """Регрессия на найденный баг: точка вне выпуклой оболочки TIN раньше
+    давала `None` -> вызывающий код (`ifc/assemble.py`) подставлял абсолютный
+    Z=0 — угол дорожного покрытия на реальной отметке рельефа (например,
+    150 м) рисовался «в минус бесконечность» на Z=0, а не оставался у земли.
+    Теперь — отметка ближайшей вершины TIN, что всегда близко к реальному
+    рельефу рядом с участком."""
+    values, grid = _make_planar_grid()
+    tin = build_site_tin(values, grid, CENTER_X, CENTER_Y, RADIUS, planar_site_features)
+
+    far_outside = (RADIUS * 10.0, RADIUS * 10.0)
+    z = tin.interpolate_z(*far_outside)
+    assert z is not None
+    assert z != 0.0  # не абсолютный ноль
+
+    # действительно отметка БЛИЖАЙШЕЙ вершины, а не какое-то другое число
+    dist = np.hypot(tin.vertices[:, 0] - far_outside[0], tin.vertices[:, 1] - far_outside[1])
+    nearest_z = tin.vertices[np.argmin(dist), 2]
+    assert z == pytest.approx(nearest_z)
+
+
+def test_build_profile_elevation_fn_is_flat_across_cross_section_and_follows_slope_along_line():
+    """Отметка реки/водоёма (`geometry/water.py`) в сечении, перпендикулярном
+    течению, одинакова на обоих «берегах», а вдоль течения гладко меняется
+    вместе со сглаженным рельефом — не единый минимум по всему контуру сразу
+    (докстринг `build_profile_elevation_fn`)."""
+    values, grid = _make_planar_grid()
+
+    def elevation_fn(x, y):
+        return sample_bilinear(values, grid, x, y)
+
+    axis = LineString([(CENTER_X - 100, CENTER_Y), (CENTER_X + 100, CENTER_Y)])
+    level_fn = build_profile_elevation_fn(axis, elevation_fn, step=5.0, window_m=20.0)
+
+    for x in (CENTER_X - 50.0, CENTER_X, CENTER_X + 60.0):
+        expected = PLANE_A * x + PLANE_B * CENTER_Y + PLANE_C
+        assert level_fn(x, CENTER_Y) == pytest.approx(expected, abs=1e-6)
+
+    x_probe = CENTER_X + 20.0
+    z_bank_a = level_fn(x_probe, CENTER_Y - 15.0)
+    z_bank_b = level_fn(x_probe, CENTER_Y + 15.0)
+    assert z_bank_a == pytest.approx(z_bank_b, abs=1e-9)
