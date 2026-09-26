@@ -364,7 +364,10 @@ def build_site_ifc(
             f, body_context, "IfcBuildingElementProxy", lane_name, "USERDEFINED",
             mesh,
             {
-                "Pset_Полоса": {"Тип": lane.lane_type, "Ширина_м": lane.width_m, "Направление": lane.direction},
+                "Pset_Полоса": {
+                    "Тип": lane.lane_type, "Ширина_м": lane.width_m, "Направление": lane.direction,
+                    "Покрытие": lane.surface or "",
+                },
                 "Pset_Контекст": {"Источник": "osm2streets (Шаг 2.3, п. 1)"},
             },
         )

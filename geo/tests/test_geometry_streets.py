@@ -191,6 +191,77 @@ def test_crossroads_curbs_only_on_paved_roads():
     assert not any(13 in curb.osm_way_ids for curb in curbs)
 
 
+# --- покрытие (Шаг 2.3, п. 4) -------------------------------------------
+
+
+def test_lane_surface_matches_source_way_tag():
+    single = [
+        RawRoadWay(
+            osm_id=30, tags={"highway": "residential", "lanes": "2", "surface": "asphalt"},
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    non_curb = [lane for lane in lanes if lane.lane_type != "Curb"]
+    assert non_curb  # проезжая часть/тротуар нашлись
+    assert all(lane.surface == "asphalt" for lane in non_curb)
+
+
+def test_lane_surface_is_none_when_tag_absent():
+    single = [
+        RawRoadWay(
+            osm_id=31, tags={"highway": "residential", "lanes": "2"},
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    assert all(lane.surface is None for lane in lanes if lane.lane_type != "Curb")
+
+
+def test_curb_surface_is_none_not_a_real_tag():
+    single = [
+        RawRoadWay(
+            osm_id=32, tags={"highway": "residential", "lanes": "2", "surface": "asphalt"},
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    curbs = [lane for lane in lanes if lane.lane_type == "Curb"]
+    assert curbs
+    assert all(curb.surface is None for curb in curbs)
+
+
+def test_different_roads_keep_their_own_surface():
+    # 2 дороги, встречающиеся только друг с другом (степень узла 2), для
+    # osm2streets - не настоящий перекрёсток, они склеиваются в один "road"
+    # (проверено эмпирически: тогда у объединённой полосы surface только от
+    # первого way) - берём настоящий перекрёсток (степень 3), чтобы дороги
+    # остались раздельными.
+    roads = [
+        RawRoadWay(
+            osm_id=40, tags={"highway": "residential", "lanes": "2", "surface": "asphalt"},
+            node_ids=[1, 2], geometry=LineString([(56.2430, 58.0105), (56.2430, 58.0125)]),
+        ),
+        RawRoadWay(
+            osm_id=41, tags={"highway": "residential", "lanes": "2", "surface": "paving_stones"},
+            node_ids=[1, 3], geometry=LineString([(56.2430, 58.0105), (56.2460, 58.0105)]),
+        ),
+        RawRoadWay(
+            osm_id=42, tags={"highway": "residential", "lanes": "2", "surface": "asphalt"},
+            node_ids=[1, 4], geometry=LineString([(56.2430, 58.0105), (56.2430, 58.0085)]),
+        ),
+    ]
+    lanes = build_lane_network(roads, CENTER_LON, CENTER_LAT, 500.0, ZONE).lanes
+    surfaces_by_way = {40: set(), 41: set(), 42: set()}
+    for lane in lanes:
+        for way_id in lane.osm_way_ids:
+            if lane.surface is not None:
+                surfaces_by_way[way_id].add(lane.surface)
+    assert surfaces_by_way[40] == {"asphalt"}
+    assert surfaces_by_way[41] == {"paving_stones"}
+    assert surfaces_by_way[42] == {"asphalt"}
+
+
 def test_node_available_check_matches_shutil():
     assert is_osm2streets_available() == (
         shutil.which("node") is not None and (OSM2STREETS_DIR / "node_modules" / "osm2streets-js").is_dir()

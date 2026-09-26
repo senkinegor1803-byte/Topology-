@@ -1,4 +1,5 @@
-"""Дороги по полосам через osm2streets (Шаг 2.3, п. 1 и 3), бордюр (п. 2).
+"""Дороги по полосам через osm2streets (Шаг 2.3, п. 1 и 3), бордюр (п. 2)
+и покрытие (п. 4).
 
 osm2streets (A/B Street) — единственный существующий инструмент, который
 по тегам OSM (`highway`, `lanes`, `sidewalk`, `parking:*`, ...) и реальной
@@ -83,6 +84,7 @@ class LaneRibbon:
     width_m: float
     direction: str  # Fwd/Back (или "" для перекрёстков/симметричных элементов)
     polygon: Polygon
+    surface: str | None = None  # тег surface=* исходной дороги как есть (Шаг 2.3, п. 4); None у бордюра - не тег
 
 
 @dataclass(frozen=True)
@@ -188,7 +190,21 @@ def _is_unpaved(tags: dict[str, str]) -> bool:
     return str(tags.get("surface", "")).strip().lower() in UNPAVED_SURFACES
 
 
-def _build_curb_strips(lanes: list[LaneRibbon], raw_roads: list[RawRoadWay]) -> list[LaneRibbon]:
+def _surface_of(way_ids: tuple[int, ...], tags_by_way_id: dict[int, dict[str, str]]) -> str | None:
+    """Тег `surface=*` дороги как есть (Шаг 2.3, п. 4) - первое найденное
+    значение среди `way_ids` (в подавляющем большинстве случаев там ровно
+    один way; смешанное покрытие одной полосы, слитой osm2streets из
+    нескольких way, здесь не разбирается отдельно)."""
+    for way_id in way_ids:
+        surface = tags_by_way_id.get(way_id, {}).get("surface")
+        if surface:
+            return str(surface).strip() or None
+    return None
+
+
+def _build_curb_strips(
+    lanes: list[LaneRibbon], tags_by_way_id: dict[int, dict[str, str]]
+) -> list[LaneRibbon]:
     """Синтезировать бордюр (Шаг 2.3, п. 2) на границе проезжей части и
     тротуара — osm2streets отдаёт только сами полосы, не бордюр между ними
     (см. docstring модуля). Граница ищется геометрически (общая линия между
@@ -199,8 +215,6 @@ def _build_curb_strips(lanes: list[LaneRibbon], raw_roads: list[RawRoadWay]) -> 
     Без бордюра, если: нет одновременно проезжей части и тротуара (нечего
     разделять), или дорога грунтовая (`surface` без покрытия, Шаг 2.3, п. 4
     — «грунтовые дороги без бордюров»)."""
-    tags_by_way_id = {road.osm_id: road.tags for road in raw_roads}
-
     groups: dict[tuple[int, ...], list[LaneRibbon]] = {}
     for lane in lanes:
         groups.setdefault(lane.osm_way_ids, []).append(lane)
@@ -275,20 +289,22 @@ def build_lane_network(
     result = _run_osm2streets(osm_xml, clip_geojson, import_options or DEFAULT_IMPORT_OPTIONS)
 
     center_x, center_y, _ = wgs84_to_msk59(center_lon, center_lat, zone=zone)
+    tags_by_way_id = {road.osm_id: road.tags for road in raw_roads}
 
     lanes = [
         LaneRibbon(
-            osm_way_ids=tuple(props.get("osm_way_ids", [])),
+            osm_way_ids=(way_ids := tuple(props.get("osm_way_ids", []))),
             lane_type=str(props.get("type", "")),
             width_m=float(props.get("width", 0.0)),
             direction=str(props.get("direction", "")),
             polygon=polygon,
+            surface=_surface_of(way_ids, tags_by_way_id),
         )
         for polygon, props in _localize_features(
             result.get("lanes", {}).get("features", []), zone, center_x, center_y, radius_m
         )
     ]
-    lanes += _build_curb_strips(lanes, raw_roads)
+    lanes += _build_curb_strips(lanes, tags_by_way_id)
 
     intersections = [
         IntersectionArea(kind=str(props.get("type", "")), polygon=polygon)

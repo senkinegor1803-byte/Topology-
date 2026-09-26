@@ -251,7 +251,7 @@ def _psets_of_proxy_by_name(model, name: str) -> dict:
 def test_build_site_ifc_writes_lane_and_intersection_properties():
     lane = LaneRibbon(
         osm_way_ids=(10, 11), lane_type="Driving", width_m=3.0, direction="Fwd",
-        polygon=Polygon([(-5, -1), (5, -1), (5, 1), (-5, 1)]),
+        polygon=Polygon([(-5, -1), (5, -1), (5, 1), (-5, 1)]), surface="asphalt",
     )
     intersection = IntersectionArea(kind="sidewalk corner", polygon=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]))
     model = SiteModel(lanes=[lane], intersections=[intersection])
@@ -260,7 +260,9 @@ def test_build_site_ifc_writes_lane_and_intersection_properties():
     assert validate_model(f) == []
 
     lane_psets = _psets_of_proxy_by_name(f, "Полоса 10+11")
-    assert lane_psets["Pset_Полоса"] == {"Тип": "Driving", "Ширина_м": 3.0, "Направление": "Fwd"}
+    assert lane_psets["Pset_Полоса"] == {
+        "Тип": "Driving", "Ширина_м": 3.0, "Направление": "Fwd", "Покрытие": "asphalt",
+    }
 
     inter_psets = _psets_of_proxy_by_name(f, "Перекрёсток (sidewalk corner)")
     assert inter_psets["Pset_Перекрёсток"] == {"Тип": "sidewalk corner"}
