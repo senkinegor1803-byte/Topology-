@@ -59,12 +59,7 @@ def test_empty_input_returns_empty_lists():
 
 def test_crossroads_produces_driving_and_sidewalk_lanes_per_road():
     lanes = build_lane_network(_crossroads(), CENTER_LON, CENTER_LAT, 500.0, ZONE).lanes
-
-    assert len(lanes) == 16  # 4 дороги x (2 проезжие полосы + 2 тротуара)
     assert all(isinstance(lane, LaneRibbon) for lane in lanes)
-
-    types = {lane.lane_type for lane in lanes}
-    assert types == {"Driving", "Sidewalk"}
 
     driving = [lane for lane in lanes if lane.lane_type == "Driving"]
     sidewalks = [lane for lane in lanes if lane.lane_type == "Sidewalk"]
@@ -72,7 +67,7 @@ def test_crossroads_produces_driving_and_sidewalk_lanes_per_road():
     assert len(sidewalks) == 8
     assert all(lane.width_m == pytest.approx(3.0) for lane in driving)
     assert all(lane.width_m == pytest.approx(1.5) for lane in sidewalks)
-    assert all(lane.direction in ("Fwd", "Back") for lane in lanes)
+    assert all(lane.direction in ("Fwd", "Back") for lane in driving + sidewalks)
 
     way_ids_seen = {osm_id for lane in lanes for osm_id in lane.osm_way_ids}
     assert way_ids_seen == {10, 11, 12, 13}
@@ -111,7 +106,7 @@ def test_single_road_without_intersection_still_produces_lanes():
         ),
     ]
     network = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE)
-    assert len(network.lanes) == 4  # 2 проезжие + 2 тротуара
+    assert len(network.lanes) == 6  # 2 проезжие + 2 тротуара + 2 бордюра (по стороне)
     assert network.intersections == []
 
 
@@ -151,6 +146,49 @@ def test_turn_lanes_tag_produces_lane_arrow_markings():
     markings = build_lane_network(roads, CENTER_LON, CENTER_LAT, 500.0, ZONE).markings
     kinds = {m.kind for m in markings}
     assert "lane arrow" in kinds
+
+
+# --- бордюр (Шаг 2.3, п. 2, 4) ------------------------------------------
+
+
+def test_paved_road_gets_curb_between_driving_and_sidewalk():
+    single = [
+        RawRoadWay(
+            osm_id=20, tags={"highway": "residential", "lanes": "2"},
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    curbs = [lane for lane in lanes if lane.lane_type == "Curb"]
+
+    assert len(curbs) == 2  # по бордюру на каждую сторону дороги
+    assert all(curb.width_m == pytest.approx(0.15) for curb in curbs)
+    assert all(curb.osm_way_ids == (20,) for curb in curbs)
+    assert all(curb.polygon.is_valid and curb.polygon.area > 0 for curb in curbs)
+
+
+def test_dirt_road_gets_no_curb():
+    single = [
+        RawRoadWay(
+            osm_id=21, tags={"highway": "track", "surface": "ground"},
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    assert not any(lane.lane_type == "Curb" for lane in lanes)
+
+
+def test_crossroads_curbs_only_on_paved_roads():
+    roads = _crossroads()
+    roads[-1] = RawRoadWay(
+        osm_id=13, tags={"highway": "track", "surface": "unpaved", "name": "West"},
+        node_ids=[1, 5], geometry=LineString([(56.2430, 58.0105), (56.2400, 58.0105)]),
+    )
+    lanes = build_lane_network(roads, CENTER_LON, CENTER_LAT, 500.0, ZONE).lanes
+    curbs = [lane for lane in lanes if lane.lane_type == "Curb"]
+
+    assert len(curbs) == 6  # 3 мощёные дороги x 2 бордюра, грунтовая (13) - без
+    assert not any(13 in curb.osm_way_ids for curb in curbs)
 
 
 def test_node_available_check_matches_shutil():

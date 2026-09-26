@@ -139,7 +139,7 @@ def test_crossroads_lanes_and_intersection_survive_full_pipeline_into_ifc(pg_tes
         job = client.get(f"/jobs/{job_id}").json()
         assert job["status"] == "done", job
         assemble_step = next(s for s in job["steps"] if s["step_name"] == "assemble_ifc")
-        assert assemble_step["result"]["lanes"] == 16  # 4 улицы x (2 проезжие + 2 тротуара)
+        assert assemble_step["result"]["lanes"] == 24  # 4 улицы x (2 проезжие + 2 тротуара + 2 бордюра)
         assert assemble_step["result"]["intersections"] == 4
         assert assemble_step["result"]["markings"] > 0
 
@@ -159,9 +159,9 @@ def test_crossroads_lanes_and_intersection_survive_full_pipeline_into_ifc(pg_tes
             }
 
         lanes = [e for e in model.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Полоса ")]
-        assert len(lanes) == 16
+        assert len(lanes) == 24
         lane_types = {_psets(lane)["Pset_Полоса"]["Тип"] for lane in lanes}
-        assert lane_types == {"Driving", "Sidewalk"}
+        assert lane_types == {"Driving", "Sidewalk", "Curb"}
 
         intersections = [
             e for e in model.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Перекрёсток")

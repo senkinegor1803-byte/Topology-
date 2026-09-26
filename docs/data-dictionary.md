@@ -19,7 +19,7 @@ AI-сессия подготовила таблицу, подтверждени�
 | Здание (упрощённо, Этап 1) | `IfcBuildingElementProxy` | `USERDEFINED` | `Pset_Здание` (Тип, Высота_м, Источник_высоты: OSM/Overture/тип (умолчание)) | м |
 | Здание LOD2 (Этап 2 — Шаг 2.2) | `IfcBuildingElementProxy` (стены+крыша один солид на контур/часть) | `USERDEFINED` | `Pset_Здание` (как в Этапе 1, плюс Входов_всего/Вход_N_Тип/Вход_N_X_м/Вход_N_Y_м — Шаг 2.2, п. 1/3), `Pset_Крыша` (Форма, Высота_конька_м, Источник_высоты, Направление_град — только для скатной/односкатной; нет для flat), `Pset_Контекст.Часть_здания=true` для `building:part` | м |
 | Дорога, каркасная сеть | `IfcRoad` (IFC 4.3) / `IfcBuildingElementProxy`-прокси (IFC4) | по классу (`MOTORWAY`…`RESIDENTIAL` где применимо) | `Pset_Дорога` (Класс, Покрытие, Полосы, Ширина_м, Статус: официальная/расчётная) | м |
-| Полоса (Этап 2 — Шаг 2.3, п. 1, через osm2streets) | `IfcBuildingElementProxy` | `USERDEFINED` | `Pset_Полоса` (Тип: Driving/Sidewalk/Parking/…, Ширина_м, Направление: Fwd/Back) | м |
+| Полоса (Этап 2 — Шаг 2.3, п. 1, через osm2streets) | `IfcBuildingElementProxy` | `USERDEFINED` | `Pset_Полоса` (Тип: Driving/Sidewalk/Parking/…/**Curb**, Ширина_м, Направление: Fwd/Back) | м |
 | Перекрёсток / угол тротуара (Шаг 2.3, п. 1) | `IfcBuildingElementProxy` | `USERDEFINED` | `Pset_Перекрёсток` (Тип) | м |
 | Разметка (центральная линия, стрелки поворота — Шаг 2.3, п. 3, через osm2streets) | `IfcBuildingElementProxy` (один продукт на вид разметки, не на штрих) | `USERDEFINED` | `Pset_Разметка` (Тип: center line/lane arrow, Элементов — сколько штрихов/стрелок склеено) | м |
 | Дворовой проезд | `IfcRoad`/прокси, помечается отдельно | `USERDEFINED` | `Pset_Дорога` + `Редактируемый=true` | м |
@@ -50,6 +50,8 @@ AI-сессия подготовила таблицу, подтверждени�
 | `surface=asphalt` | `Pset_Дорога.Покрытие` | как есть (словарь допустимых значений — Приложение A) |
 | `lanes=2` | `Pset_Дорога.Полосы` | как есть, число |
 | `highway=*`, `lanes=*`, `sidewalk=*`, `parking:*` + связность узлов (`osm_roads.nodes`, Шаг 1.1) | `Pset_Полоса.Тип/Ширина_м/Направление` на каждую полосу | через реальный osm2streets (Шаг 2.3, п. 1, `geometry/streets.py`), не переразбор тегов на Python — источник истины типов полос и их геометрии остаётся у инструмента |
+| (синтез, не тег) граница Driving/Sidewalk одной дороги | `Pset_Полоса` (Тип=Curb, Ширина_м=0,15) | Шаг 2.3, п. 2 — osm2streets бордюр отдельно не отдаёт; строится по общей границе полос, а не по константному смещению |
+| `surface=unpaved/ground/dirt/gravel/sand/…` (вики Key:surface, Unpaved) | отсутствие полосы `Pset_Полоса.Тип=Curb` | Шаг 2.3, п. 4 — «грунтовые дороги — без бордюров» |
 | `turn:lanes=left\|right` и связность узлов | `Pset_Разметка` (center line/lane arrow) | тоже через osm2streets (Шаг 2.3, п. 3, `toLaneMarkingsGeojson`) — центральная линия и стрелки поворота уже готовыми полигонами, не отрисованы вручную по тегу |
 | `highway=motorway…tertiary` | `Pset_Дорога.Класс` = «каркасная» | см. Шаг 2.4 |
 | `highway=residential/service/living_street/footway…` | `Pset_Дорога.Класс` = «внутриквартальная» | см. Шаг 2.4 |

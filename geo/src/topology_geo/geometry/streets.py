@@ -1,4 +1,4 @@
-"""Дороги по полосам через osm2streets (Шаг 2.3, п. 1).
+"""Дороги по полосам через osm2streets (Шаг 2.3, п. 1 и 3), бордюр (п. 2).
 
 osm2streets (A/B Street) — единственный существующий инструмент, который
 по тегам OSM (`highway`, `lanes`, `sidewalk`, `parking:*`, ...) и реальной
@@ -14,6 +14,11 @@ subprocess, а не переписанная на Python копия его ло�
 Входные данные — не `SiteFeature` (Шаг 1.4 уже потерял связность узлов при
 нормализации), а `RawRoadWay` с исходными тегами и ID узлов
 (`topology_geo.osm.raw_roads`), из которых строится валидный OSM XML.
+
+Бордюр (Шаг 2.3, п. 2) osm2streets отдельным типом полосы не отдаёт
+(проверено эмпирически) — синтезируется здесь (`_build_curb_strips`) по
+общей границе между объединёнными Driving- и Sidewalk-полосами одной дороги,
+без бордюра на грунтовых дорогах (Шаг 2.3, п. 4, `UNPAVED_SURFACES`).
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from pathlib import Path
 
 from shapely.geometry import Point, shape
 from shapely.geometry.polygon import Polygon
+from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 from topology_geo.coords import msk59_to_wgs84, transform_geometry_to_msk59, wgs84_to_msk59
@@ -51,6 +57,21 @@ DEFAULT_IMPORT_OPTIONS: dict[str, object] = {
 # Вершины окружности буфера в WGS-84 (Шаг 1.4 использует круг того же
 # радиуса, без запаса — запас нужен только для выборки, см. query.py).
 CIRCLE_SEGMENTS = 64
+
+# Шаг 2.3, п. 2: бордюр между проезжей частью и тротуаром - osm2streets его
+# не выделяет отдельным типом полосы (проверено эмпирически: набор тегов с
+# parking/cycleway/sidewalk/shoulder даёт только Driving/Sidewalk/Biking),
+# синтезируется здесь (см. `_build_curb_strips`). Ширина по плану (Шаг 2.3, п. 2).
+LANE_TYPE_CURB = "Curb"
+CURB_WIDTH_M = 0.15
+
+# `surface=*` без покрытия (вики Key:surface, раздел Unpaved, проверено
+# запросом при разработке) - у таких дорог бордюра не бывает (Шаг 2.3, п. 4:
+# «грунтовые дороги — без бордюров, с колеёй»).
+UNPAVED_SURFACES = frozenset({
+    "unpaved", "compacted", "fine_gravel", "gravel", "shells", "rock", "pebblestone",
+    "ground", "dirt", "earth", "mud", "laterite", "grass", "sand", "woodchips", "snow", "ice", "salt",
+})
 
 
 @dataclass(frozen=True)
@@ -155,6 +176,62 @@ def _localize_features(features: list[dict], zone: int, center_x: float, center_
     return result
 
 
+def _as_lines(geom):
+    if geom.is_empty:
+        return []
+    if geom.geom_type.startswith("Multi") or geom.geom_type == "GeometryCollection":
+        return [g for g in geom.geoms if not g.is_empty and g.geom_type == "LineString"]
+    return [geom] if geom.geom_type == "LineString" else []
+
+
+def _is_unpaved(tags: dict[str, str]) -> bool:
+    return str(tags.get("surface", "")).strip().lower() in UNPAVED_SURFACES
+
+
+def _build_curb_strips(lanes: list[LaneRibbon], raw_roads: list[RawRoadWay]) -> list[LaneRibbon]:
+    """Синтезировать бордюр (Шаг 2.3, п. 2) на границе проезжей части и
+    тротуара — osm2streets отдаёт только сами полосы, не бордюр между ними
+    (см. docstring модуля). Граница ищется геометрически (общая линия между
+    объединением всех Driving-полос и объединением всех Sidewalk-полос одной
+    дороги), а не по константному смещению — так бордюр остаётся точным при
+    любой форме и числе полос, которые уже посчитал osm2streets.
+
+    Без бордюра, если: нет одновременно проезжей части и тротуара (нечего
+    разделять), или дорога грунтовая (`surface` без покрытия, Шаг 2.3, п. 4
+    — «грунтовые дороги без бордюров»)."""
+    tags_by_way_id = {road.osm_id: road.tags for road in raw_roads}
+
+    groups: dict[tuple[int, ...], list[LaneRibbon]] = {}
+    for lane in lanes:
+        groups.setdefault(lane.osm_way_ids, []).append(lane)
+
+    curbs: list[LaneRibbon] = []
+    for way_ids, group in groups.items():
+        if any(_is_unpaved(tags_by_way_id.get(way_id, {})) for way_id in way_ids):
+            continue
+
+        driving = unary_union([lane.polygon for lane in group if lane.lane_type == "Driving"])
+        sidewalk = unary_union([lane.polygon for lane in group if lane.lane_type == "Sidewalk"])
+        if driving.is_empty or sidewalk.is_empty:
+            continue
+
+        shared_boundary = driving.boundary.intersection(sidewalk.boundary)
+        lines = _as_lines(shared_boundary)
+        if not lines:
+            continue
+
+        curb_geom = unary_union([line.buffer(CURB_WIDTH_M / 2, cap_style="flat") for line in lines])
+        for polygon in _as_polygons(curb_geom):
+            curbs.append(
+                LaneRibbon(
+                    osm_way_ids=way_ids, lane_type=LANE_TYPE_CURB, width_m=CURB_WIDTH_M,
+                    direction="", polygon=polygon,
+                )
+            )
+
+    return curbs
+
+
 def _run_osm2streets(osm_xml: str, clip_geojson: str, import_options: dict[str, object]) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -211,6 +288,7 @@ def build_lane_network(
             result.get("lanes", {}).get("features", []), zone, center_x, center_y, radius_m
         )
     ]
+    lanes += _build_curb_strips(lanes, raw_roads)
 
     intersections = [
         IntersectionArea(kind=str(props.get("type", "")), polygon=polygon)
