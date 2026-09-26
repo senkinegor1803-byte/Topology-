@@ -20,6 +20,12 @@ subprocess, а не переписанная на Python копия его ло�
 (проверено эмпирически) — синтезируется здесь (`_build_curb_strips`) по
 общей границе между объединёнными Driving- и Sidewalk-полосами одной дороги,
 без бордюра на грунтовых дорогах (Шаг 2.3, п. 4, `UNPAVED_SURFACES`).
+
+Разделитель и газон (тоже Шаг 2.3, п. 2) — в отличие от бордюра, ЭТИ два
+osm2streets отдаёт сам, без синтеза: `SharedLeftTurn` (полоса разворота из
+`lanes:both_ways`+`turn:lanes:both_ways=left`) и `Buffer(Verge)` (газон из
+`cycleway:<сторона>:separation:<сторона>=grass_verge`) — см.
+`LANE_TYPE_GRASS_VERGE` и `_surface_for_lane`.
 """
 
 from __future__ import annotations
@@ -66,6 +72,25 @@ CIRCLE_SEGMENTS = 64
 LANE_TYPE_CURB = "Curb"
 CURB_WIDTH_M = 0.15
 
+# Разделитель и газон (остаток Шага 2.3, п. 2) — в отличие от бордюра, ЭТИ
+# два элемента osm2streets отдаёт САМ, отдельными типами полосы, без синтеза
+# на Python (тот же принцип "источник истины типов полос остаётся у
+# инструмента", что и у Driving/Sidewalk — см. docstring модуля):
+# - `SharedLeftTurn` — центральная полоса для разворота/поворота налево,
+#   реальный физический разделитель встречных потоков там, где нет сплошной
+#   линии; получается из связки тегов `lanes:both_ways=1` +
+#   `turn:lanes:both_ways=left` (проверено эмпирически, geo/osm2streets).
+# - `Buffer(Verge)` — газон между проезжей частью/велодорожкой и остальным
+#   профилем; получается из `cycleway:<сторона>:separation:<сторона>=
+#   grass_verge` (проверено эмпирически) — то же место в OSM-схеме, что и
+#   `separation=kerb/planter/jersey_barrier/...` для других физических
+#   буферов, `Buffer(...)` в остальных случаях сюда же, без синтеза.
+# Оба типа уже проходят через общий код полос (`LaneRibbon`, посадка на
+# рельеф Шага 2.3 п. 5, экспорт в IFC) без отдельной ветки — единственное
+# отличие газона от обычной полосы: покрытие (см. `_surface_for_lane`).
+LANE_TYPE_GRASS_VERGE = "Buffer(Verge)"
+GRASS_VERGE_SURFACE = "grass"
+
 # `surface=*` без покрытия (вики Key:surface, раздел Unpaved, проверено
 # запросом при разработке) - у таких дорог бордюра не бывает (Шаг 2.3, п. 4:
 # «грунтовые дороги — без бордюров, с колеёй»).
@@ -80,7 +105,8 @@ class LaneRibbon:
     """Полигон одной полосы (Шаг 2.3, п. 1) в локальных координатах участка."""
 
     osm_way_ids: tuple[int, ...]
-    lane_type: str  # значение osm2streets: Driving/Sidewalk/Parking/Shoulder/Biking/...
+    lane_type: str  # значение osm2streets: Driving/Sidewalk/Parking/Shoulder/Biking/
+    # SharedLeftTurn/Buffer(Verge)/Buffer(...)/... (или "Curb" — наш синтез, см. ниже)
     width_m: float
     direction: str  # Fwd/Back (или "" для перекрёстков/симметричных элементов)
     polygon: Polygon
@@ -202,6 +228,21 @@ def _surface_of(way_ids: tuple[int, ...], tags_by_way_id: dict[int, dict[str, st
     return None
 
 
+def _surface_for_lane(
+    lane_type: str, way_ids: tuple[int, ...], tags_by_way_id: dict[int, dict[str, str]]
+) -> str | None:
+    """Покрытие полосы (Шаг 2.3, п. 4) с одним честным исключением —
+    газоном (`LANE_TYPE_GRASS_VERGE`, остаток Шага 2.3, п. 2): физически это
+    трава, а не покрытие проезжей части, поэтому `surface=*` исходной дороги
+    сюда не переносится (иначе газон получил бы `Покрытие=asphalt`, что
+    неверно). Для всех остальных типов полос, включая `SharedLeftTurn`
+    (разделитель — та же проезжая часть, тот же асфальт) — обычная передача
+    тега дороги (`_surface_of`)."""
+    if lane_type == LANE_TYPE_GRASS_VERGE:
+        return GRASS_VERGE_SURFACE
+    return _surface_of(way_ids, tags_by_way_id)
+
+
 def _build_curb_strips(
     lanes: list[LaneRibbon], tags_by_way_id: dict[int, dict[str, str]]
 ) -> list[LaneRibbon]:
@@ -291,19 +332,22 @@ def build_lane_network(
     center_x, center_y, _ = wgs84_to_msk59(center_lon, center_lat, zone=zone)
     tags_by_way_id = {road.osm_id: road.tags for road in raw_roads}
 
-    lanes = [
-        LaneRibbon(
-            osm_way_ids=(way_ids := tuple(props.get("osm_way_ids", []))),
-            lane_type=str(props.get("type", "")),
-            width_m=float(props.get("width", 0.0)),
-            direction=str(props.get("direction", "")),
-            polygon=polygon,
-            surface=_surface_of(way_ids, tags_by_way_id),
+    lanes = []
+    for polygon, props in _localize_features(
+        result.get("lanes", {}).get("features", []), zone, center_x, center_y, radius_m
+    ):
+        way_ids = tuple(props.get("osm_way_ids", []))
+        lane_type = str(props.get("type", ""))
+        lanes.append(
+            LaneRibbon(
+                osm_way_ids=way_ids,
+                lane_type=lane_type,
+                width_m=float(props.get("width", 0.0)),
+                direction=str(props.get("direction", "")),
+                polygon=polygon,
+                surface=_surface_for_lane(lane_type, way_ids, tags_by_way_id),
+            )
         )
-        for polygon, props in _localize_features(
-            result.get("lanes", {}).get("features", []), zone, center_x, center_y, radius_m
-        )
-    ]
     lanes += _build_curb_strips(lanes, tags_by_way_id)
 
     intersections = [

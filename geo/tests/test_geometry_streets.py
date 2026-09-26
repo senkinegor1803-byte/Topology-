@@ -10,6 +10,8 @@ import pytest
 from shapely.geometry import LineString
 
 from topology_geo.geometry.streets import (
+    GRASS_VERGE_SURFACE,
+    LANE_TYPE_GRASS_VERGE,
     OSM2STREETS_DIR,
     IntersectionArea,
     LaneMarking,
@@ -260,6 +262,76 @@ def test_different_roads_keep_their_own_surface():
     assert surfaces_by_way[40] == {"asphalt"}
     assert surfaces_by_way[41] == {"paving_stones"}
     assert surfaces_by_way[42] == {"asphalt"}
+
+
+# --- разделитель и газон (остаток Шага 2.3, п. 2) -----------------------
+
+
+def test_shared_left_turn_lane_from_both_ways_turn_tag():
+    """`SharedLeftTurn` — полоса-разделитель посередине (полоса для
+    разворота/поворота налево) - реальный тег `lanes:both_ways=1` +
+    `turn:lanes:both_ways=left`, а не синтез на Python (см. docstring
+    streets.py)."""
+    single = [
+        RawRoadWay(
+            osm_id=50,
+            tags={
+                "highway": "secondary", "lanes": "4",
+                "lanes:both_ways": "1", "turn:lanes:both_ways": "left",
+                "surface": "asphalt",
+            },
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    turn_lanes = [lane for lane in lanes if lane.lane_type == "SharedLeftTurn"]
+    assert turn_lanes
+    assert all(lane.polygon.is_valid and lane.polygon.area > 0 for lane in turn_lanes)
+    # разделитель — та же проезжая часть, тот же асфальт (в отличие от газона)
+    assert all(lane.surface == "asphalt" for lane in turn_lanes)
+
+
+def test_grass_verge_lane_from_cycleway_separation_tag():
+    """`Buffer(Verge)` — газон между проезжей частью и велодорожкой,
+    реальный тег `cycleway:<сторона>:separation:<сторона>=grass_verge`, не
+    синтез на Python."""
+    single = [
+        RawRoadWay(
+            osm_id=51,
+            tags={
+                "highway": "secondary", "lanes": "2",
+                "cycleway:right": "track", "cycleway:right:separation:left": "grass_verge",
+                "surface": "asphalt",
+            },
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    verges = [lane for lane in lanes if lane.lane_type == LANE_TYPE_GRASS_VERGE]
+    assert verges
+    assert all(lane.polygon.is_valid and lane.polygon.area > 0 for lane in verges)
+
+
+def test_grass_verge_surface_is_grass_not_road_surface():
+    """Газон физически трава, а не покрытие проезжей части - `Покрытие`
+    газона не должен наследовать `surface=asphalt` дороги (в отличие от
+    `SharedLeftTurn`, см. `test_shared_left_turn_lane_from_both_ways_turn_tag`)."""
+    single = [
+        RawRoadWay(
+            osm_id=52,
+            tags={
+                "highway": "secondary", "lanes": "2",
+                "cycleway:right": "track", "cycleway:right:separation:left": "grass_verge",
+                "surface": "asphalt",
+            },
+            node_ids=[100, 101], geometry=LineString([(56.2430, 58.0105), (56.2450, 58.0105)]),
+        ),
+    ]
+    lanes = build_lane_network(single, 56.2440, 58.0105, 500.0, ZONE).lanes
+    verges = [lane for lane in lanes if lane.lane_type == LANE_TYPE_GRASS_VERGE]
+    assert verges
+    assert all(lane.surface == GRASS_VERGE_SURFACE for lane in verges)
+    assert GRASS_VERGE_SURFACE != "asphalt"
 
 
 def test_node_available_check_matches_shutil():
