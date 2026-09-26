@@ -85,6 +85,16 @@ flowchart LR
    `GET /models/{id}/files` как `assemble_ifc:IFC4`/`assemble_ifc:IFC4X3`
    (шаг возвращает несколько файлов, а не один `storage_key` — эндпоинт
    разворачивает `result["schemas"][схема]["storage_key"]` в отдельные записи).
+   Плюс (Шаг 2.4, п. 4) ещё два файла НА КАЖДУЮ схему — только дорожная
+   сеть, разделённая на каркасную и внутриквартальную
+   (`jobs/{id}/roads_backbone_ifc4.ifc` и т. п., `build_site_ifc` с
+   `road_network_filter`), видны как `assemble_ifc:{схема}:roads_backbone`/
+   `assemble_ifc:{схема}:roads_internal` (эндпоинт разворачивает любой ключ
+   `<имя>_storage_key` в `schemas[схема]`, не только буквально `storage_key`).
+   Реестр GlobalId для них — под отдельным `model_id`
+   (`{job_id}:roads_backbone`/`{job_id}:roads_internal`), чтобы не затирать
+   записи комбинированной модели с тем же `(layer, osm_id)`, но другим
+   GlobalId.
 5. **`convert_to_glb`** — Шаг 1.9, п. 1: скачивает `site_ifc4x3.ifc` (схема с
    нативными классами) из Storage, конвертирует в GLB
    (`topology_geo.ifc.to_glb.convert_ifc_to_glb`: `ifcopenshell.geom.iterator`

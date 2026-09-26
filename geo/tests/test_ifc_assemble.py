@@ -12,6 +12,7 @@ from shapely.geometry import LineString, Polygon
 
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
 from topology_geo.geometry.rail import RailRibbon
+from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import RoadRibbon
 from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRibbon
 from topology_geo.geometry.vegetation import TreePoint
@@ -153,6 +154,7 @@ def _make_site_model() -> SiteModel:
     road = RoadRibbon(
         osm_id=2, ribbon=LineString([(-40, 0), (40, 0)]).buffer(3.0, cap_style="flat"),
         width_m=6.0, width_confidence="умолчание", surface="asphalt", highway_class="residential",
+        network="внутриквартальная",
     )
     water = WaterArea(osm_id=3, polygon=Polygon([(20, 20), (30, 20), (30, 30), (20, 30)]), level_z=99.5)
     waterway = WaterwayRibbon(osm_id=4, ribbon=LineString([(0, -40), (0, 40)]).buffer(1.5, cap_style="flat"), width_m=3.0)
@@ -268,10 +270,11 @@ def test_build_site_ifc_writes_lane_and_intersection_properties():
     lane_psets = _psets_of_proxy_by_name(f, "Полоса 10+11")
     assert lane_psets["Pset_Полоса"] == {
         "Тип": "Driving", "Ширина_м": 3.0, "Направление": "Fwd", "Покрытие": "asphalt",
+        "Сеть": "внутриквартальная", "Редактируемый": True,
     }
 
     inter_psets = _psets_of_proxy_by_name(f, "Перекрёсток (sidewalk corner)")
-    assert inter_psets["Pset_Перекрёсток"] == {"Тип": "sidewalk corner"}
+    assert inter_psets["Pset_Перекрёсток"] == {"Тип": "sidewalk corner", "Сеть": "внутриквартальная"}
 
     # одна полоса с несколькими osm_way_ids -> запись реестра на каждый way
     # (тот же принятый компромисс, что и многосегментные road.ribbon/waterway.ribbon).
@@ -300,10 +303,14 @@ def test_build_site_ifc_merges_markings_of_same_kind_into_one_product():
     assert len(marking_products) == 2  # один продукт на вид, не на штрих
 
     center_line_psets = _psets_of_proxy_by_name(f, "Разметка (center line)")
-    assert center_line_psets["Pset_Разметка"] == {"Тип": "center line", "Элементов": 2}
+    assert center_line_psets["Pset_Разметка"] == {
+        "Тип": "center line", "Элементов": 2, "Сеть": "внутриквартальная",
+    }
 
     arrow_psets = _psets_of_proxy_by_name(f, "Разметка (lane arrow)")
-    assert arrow_psets["Pset_Разметка"] == {"Тип": "lane arrow", "Элементов": 1}
+    assert arrow_psets["Pset_Разметка"] == {
+        "Тип": "lane arrow", "Элементов": 1, "Сеть": "внутриквартальная",
+    }
 
     assert registry == []  # без естественного osm_id
 
@@ -438,6 +445,7 @@ def test_build_site_ifc_road_lane_and_marking_are_above_terrain_end_to_end():
     road = RoadRibbon(
         osm_id=2, ribbon=LineString([(-40, 0), (40, 0)]).buffer(3.0, cap_style="flat"),
         width_m=6.0, width_confidence="умолчание", surface="asphalt", highway_class="residential",
+        network="внутриквартальная",
     )
     marking = LaneMarking(kind="center line", polygon=Polygon([(-2, -0.05), (2, -0.05), (2, 0.05), (-2, 0.05)]))
     model = SiteModel(tin=tin, roads=[road], markings=[marking])
@@ -450,3 +458,150 @@ def test_build_site_ifc_road_lane_and_marking_are_above_terrain_end_to_end():
     marking_z = [c[2] for c in _mesh_coords(marking_product)]
 
     assert min(marking_z) > max(road_z)  # разметка строго выше покрытия дороги, а не вровень с ним
+
+
+# --- road_network_filter (Шаг 2.4, п. 1 и 4) -----------------------------
+
+
+def _make_mixed_network_model() -> SiteModel:
+    """Один backbone-объект каждого типа (дорога/полоса/перекрёсток/
+    разметка) + один internal - плюс здание/вода/ж-д/дерево, которых в
+    роли-фильтрованном файле дорог быть не должно вовсе."""
+    backbone_road = RoadRibbon(
+        osm_id=100, ribbon=LineString([(-40, 10), (40, 10)]).buffer(5.0, cap_style="flat"),
+        width_m=10.0, width_confidence="умолчание", surface="asphalt", highway_class="primary",
+        network=NETWORK_BACKBONE,
+    )
+    internal_road = RoadRibbon(
+        osm_id=101, ribbon=LineString([(-40, -10), (40, -10)]).buffer(3.0, cap_style="flat"),
+        width_m=6.0, width_confidence="умолчание", surface="asphalt", highway_class="residential",
+        network=NETWORK_INTERNAL,
+    )
+    backbone_lane = LaneRibbon(
+        osm_way_ids=(100,), lane_type="Driving", width_m=3.0, direction="Fwd",
+        polygon=Polygon([(-5, 8), (5, 8), (5, 12), (-5, 12)]), surface="asphalt", network=NETWORK_BACKBONE,
+    )
+    internal_lane = LaneRibbon(
+        osm_way_ids=(101,), lane_type="Driving", width_m=3.0, direction="Fwd",
+        polygon=Polygon([(-5, -12), (5, -12), (5, -8), (-5, -8)]), surface="asphalt", network=NETWORK_INTERNAL,
+    )
+    backbone_intersection = IntersectionArea(
+        kind="sidewalk corner", polygon=Polygon([(20, 8), (22, 8), (22, 12), (20, 12)]), network=NETWORK_BACKBONE,
+    )
+    internal_intersection = IntersectionArea(
+        kind="sidewalk corner", polygon=Polygon([(20, -12), (22, -12), (22, -8), (20, -8)]),
+        network=NETWORK_INTERNAL,
+    )
+    backbone_marking = LaneMarking(
+        kind="center line", polygon=Polygon([(0, 9.95), (1, 9.95), (1, 10.05), (0, 10.05)]),
+        network=NETWORK_BACKBONE,
+    )
+    internal_marking = LaneMarking(
+        kind="center line", polygon=Polygon([(0, -10.05), (1, -10.05), (1, -9.95), (0, -9.95)]),
+        network=NETWORK_INTERNAL,
+    )
+    building = BuildingSolid(
+        osm_id=1, footprint=Polygon([(-10, 30), (10, 30), (10, 40), (-10, 40)]),
+        height_m=12.0, height_confidence="факт", height_source="OSM", base_z=100.0, building_type="жилой",
+    )
+    water = WaterArea(osm_id=3, polygon=Polygon([(20, 20), (30, 20), (30, 30), (20, 30)]), level_z=99.5)
+    rail = RailRibbon(osm_id=5, ballast=LineString([(-40, -30), (40, -30)]).buffer(2.0, cap_style="flat"), rail_type="tram")
+    tree = TreePoint(x=15.0, y=-25.0, species="Betula pendula", confidence="факт", source_osm_id=6)
+    return SiteModel(
+        tin=_make_flat_tin(),
+        roads=[backbone_road, internal_road],
+        lanes=[backbone_lane, internal_lane],
+        intersections=[backbone_intersection, internal_intersection],
+        markings=[backbone_marking, internal_marking],
+        buildings=[building], water_areas=[water], rail=[rail], trees=[tree],
+    )
+
+
+def test_road_network_filter_backbone_keeps_only_backbone_roads_and_lanes():
+    f, _ = build_site_ifc("IFC4", _make_mixed_network_model(), BASE_POINT, road_network_filter=NETWORK_BACKBONE)
+    assert validate_model(f) == []
+
+    road_names = {e.Name for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Дорога")}
+    assert road_names == {"Дорога 100"}
+
+    lane_names = {e.Name for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Полоса")}
+    assert lane_names == {"Полоса 100"}
+
+    inter_psets = _psets_of_proxy_by_name(f, "Перекрёсток (sidewalk corner)")
+    assert inter_psets["Pset_Перекрёсток"]["Сеть"] == NETWORK_BACKBONE
+
+    marking_psets = _psets_of_proxy_by_name(f, "Разметка (center line)")
+    assert marking_psets["Pset_Разметка"] == {"Тип": "center line", "Элементов": 1, "Сеть": NETWORK_BACKBONE}
+
+
+def test_road_network_filter_internal_keeps_only_internal_roads_and_lanes():
+    f, _ = build_site_ifc("IFC4", _make_mixed_network_model(), BASE_POINT, road_network_filter=NETWORK_INTERNAL)
+    assert validate_model(f) == []
+
+    road_names = {e.Name for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Дорога")}
+    assert road_names == {"Дорога 101"}
+
+    lane_names = {e.Name for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Полоса")}
+    assert lane_names == {"Полоса 101"}
+
+
+def test_road_network_filter_excludes_buildings_water_rail_trees():
+    for network in (NETWORK_BACKBONE, NETWORK_INTERNAL):
+        f, registry = build_site_ifc(
+            "IFC4", _make_mixed_network_model(), BASE_POINT, road_network_filter=network
+        )
+        assert validate_model(f) == []
+        assert not any((e.Name or "").startswith("Здание") for e in f.by_type("IfcBuildingElementProxy"))
+        assert not any((e.Name or "").startswith("Ж/д") for e in f.by_type("IfcBuildingElementProxy"))
+        # ни рельефа (TIN), ни воды, ни деревьев (все три - IfcGeographicElement)
+        # быть не должно вовсе - см. test_road_network_filter_excludes_relief_tin
+        # про то, почему рельеф здесь тоже исключён, а не оставлен как
+        # "общая привязка".
+        assert f.by_type("IfcGeographicElement") == []
+        assert not any(layer == "osm_water_areas" for layer, _, _ in registry)
+        assert not any(layer == "osm_railways" for layer, _, _ in registry)
+        assert not any(layer == "osm_vegetation" for layer, _, _ in registry)
+
+
+def test_road_network_filter_excludes_relief_tin():
+    """Рельеф (TIN) не относится ни к одной из двух сетей и НЕ включается в
+    отфильтрованные файлы (Шаг 2.4, п. 4) - в отличие от первой версии этого
+    прохода. Причина не эстетическая: меш TIN на честном участке (шаг сетки
+    1 м, Шаг 1.5) - самая тяжёлая по памяти часть сборки IFC (сотни тысяч
+    вершин на средний радиус); дублирование его в обоих файлах на каждую
+    схему означало реальный OOM на сквозном прогоне (не гипотетический -
+    воспроизведено при разработке). Полосы/дороги уже несут свою абсолютную
+    высоту (посадка на рельеф, Шаг 2.3, п. 5) - сам меш для их отображения
+    не нужен."""
+    for network in (NETWORK_BACKBONE, NETWORK_INTERNAL):
+        f, _ = build_site_ifc("IFC4", _make_mixed_network_model(), BASE_POINT, road_network_filter=network)
+        terrain = [e for e in f.by_type("IfcGeographicElement") if e.Name == "Рельеф участка (TIN)"]
+        assert terrain == []
+
+    # В полном (нефильтрованном) site.ifc рельеф остаётся, как и раньше.
+    f, _ = build_site_ifc("IFC4", _make_mixed_network_model(), BASE_POINT)
+    terrain = [e for e in f.by_type("IfcGeographicElement") if e.Name == "Рельеф участка (TIN)"]
+    assert len(terrain) == 1
+
+
+def test_road_network_filter_none_keeps_full_combined_model():
+    f, _ = build_site_ifc("IFC4", _make_mixed_network_model(), BASE_POINT)
+    assert validate_model(f) == []
+    road_names = {e.Name for e in f.by_type("IfcBuildingElementProxy") if (e.Name or "").startswith("Дорога")}
+    assert road_names == {"Дорога 100", "Дорога 101"}
+    assert any((e.Name or "").startswith("Здание") for e in f.by_type("IfcBuildingElementProxy"))
+
+    # штрихи разметки обеих сетей склеены в один продукт "center line" -
+    # честно нет единой "Сеть" на группу (см. build_site_ifc), а не наугад.
+    marking_psets = _psets_of_proxy_by_name(f, "Разметка (center line)")
+    assert "Сеть" not in marking_psets["Pset_Разметка"]
+    assert marking_psets["Pset_Разметка"]["Элементов"] == 2
+
+
+def test_road_network_filter_roads_registry_does_not_include_other_network():
+    _, registry = build_site_ifc(
+        "IFC4", _make_mixed_network_model(), BASE_POINT, road_network_filter=NETWORK_BACKBONE
+    )
+    registered_osm_ids = {osm_id for _, osm_id, _ in registry}
+    assert 100 in registered_osm_ids
+    assert 101 not in registered_osm_ids

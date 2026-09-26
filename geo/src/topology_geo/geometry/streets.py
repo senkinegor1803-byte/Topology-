@@ -26,6 +26,11 @@ osm2streets отдаёт сам, без синтеза: `SharedLeftTurn` (пол
 `lanes:both_ways`+`turn:lanes:both_ways=left`) и `Buffer(Verge)` (газон из
 `cycleway:<сторона>:separation:<сторона>=grass_verge`) — см.
 `LANE_TYPE_GRASS_VERGE` и `_surface_for_lane`.
+
+Каркасная/внутриквартальная сеть (Шаг 2.4, п. 1, `geometry.road_network`) —
+у полосы/бордюра есть `osm_way_ids`, классификация по тегу дороги
+(`_network_of`); у перекрёстка/разметки своего `osm_way_ids` нет — по факту
+геометрического касания уже классифицированной каркасной полосы.
 """
 
 from __future__ import annotations
@@ -42,6 +47,11 @@ from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 from topology_geo.coords import msk59_to_wgs84, transform_geometry_to_msk59, wgs84_to_msk59
+from topology_geo.geometry.road_network import (
+    NETWORK_BACKBONE,
+    NETWORK_INTERNAL,
+    classify_road_network,
+)
 from topology_geo.osm.raw_roads import RawRoadWay, build_osm_xml
 from topology_geo.selection.clip import clip_and_localize
 
@@ -111,14 +121,24 @@ class LaneRibbon:
     direction: str  # Fwd/Back (или "" для перекрёстков/симметричных элементов)
     polygon: Polygon
     surface: str | None = None  # тег surface=* исходной дороги как есть (Шаг 2.3, п. 4); None у бордюра - не тег
+    # каркасная/внутриквартальная (Шаг 2.4, п. 1) - реально вычисляется в
+    # build_lane_network (classify_road_network по тегу дороги); умолчание
+    # здесь только для прямого конструирования в тестах, не участвующих в
+    # проверке классификации.
+    network: str = NETWORK_INTERNAL
 
 
 @dataclass(frozen=True)
 class IntersectionArea:
-    """Полигон перекрёстка/угла тротуара (Шаг 2.3, п. 1) в локальных координатах."""
+    """Полигон перекрёстка/угла тротуара (Шаг 2.3, п. 1) в локальных
+    координатах. `network` (Шаг 2.4, п. 1) — у перекрёстка нет своего
+    `osm_way_ids` (собран из нескольких way), поэтому классифицируется не по
+    тегу, а геометрически: каркасная, если касается хотя бы одной каркасной
+    полосы (`build_lane_network`)."""
 
     kind: str
     polygon: Polygon
+    network: str = NETWORK_INTERNAL
 
 
 @dataclass(frozen=True)
@@ -130,6 +150,10 @@ class LaneMarking:
 
     kind: str  # "center line" | "lane arrow" (значения osm2streets)
     polygon: Polygon
+    # каркасная/внутриквартальная (Шаг 2.4, п. 1) - как у IntersectionArea,
+    # геометрически (касается ли каркасной полосы), у разметки тоже нет
+    # своего osm_way_ids.
+    network: str = NETWORK_INTERNAL
 
 
 @dataclass(frozen=True)
@@ -228,6 +252,17 @@ def _surface_of(way_ids: tuple[int, ...], tags_by_way_id: dict[int, dict[str, st
     return None
 
 
+def _network_of(way_ids: tuple[int, ...], tags_by_way_id: dict[int, dict[str, str]]) -> str:
+    """Каркасная/внутриквартальная сеть полосы (Шаг 2.4, п. 1) - по тегу
+    `highway=*` первого найденного way среди `way_ids` (тот же принцип и то
+    же ограничение смешанного случая, что и у `_surface_of`)."""
+    for way_id in way_ids:
+        highway_class = tags_by_way_id.get(way_id, {}).get("highway")
+        if highway_class:
+            return classify_road_network(str(highway_class).strip())
+    return NETWORK_INTERNAL
+
+
 def _surface_for_lane(
     lane_type: str, way_ids: tuple[int, ...], tags_by_way_id: dict[int, dict[str, str]]
 ) -> str | None:
@@ -276,11 +311,12 @@ def _build_curb_strips(
             continue
 
         curb_geom = unary_union([line.buffer(CURB_WIDTH_M / 2, cap_style="flat") for line in lines])
+        network = _network_of(way_ids, tags_by_way_id)
         for polygon in _as_polygons(curb_geom):
             curbs.append(
                 LaneRibbon(
                     osm_way_ids=way_ids, lane_type=LANE_TYPE_CURB, width_m=CURB_WIDTH_M,
-                    direction="", polygon=polygon,
+                    direction="", polygon=polygon, network=network,
                 )
             )
 
@@ -346,19 +382,34 @@ def build_lane_network(
                 direction=str(props.get("direction", "")),
                 polygon=polygon,
                 surface=_surface_for_lane(lane_type, way_ids, tags_by_way_id),
+                network=_network_of(way_ids, tags_by_way_id),
             )
         )
     lanes += _build_curb_strips(lanes, tags_by_way_id)
 
+    # Перекрёсток/разметка (Шаг 2.4, п. 1) не хранят свой osm_way_ids (собраны
+    # из нескольких way или не привязаны к одному вовсе, см. docstring
+    # IntersectionArea/LaneMarking) - классифицируются геометрически:
+    # каркасная, если касаются хотя бы одной уже классифицированной каркасной
+    # полосы (реальное касание готовой геометрии, не догадка по тегам).
+    backbone_union = unary_union(
+        [lane.polygon for lane in lanes if lane.network == NETWORK_BACKBONE]
+    )
+
+    def _network_by_touch(polygon: Polygon) -> str:
+        if not backbone_union.is_empty and polygon.intersects(backbone_union):
+            return NETWORK_BACKBONE
+        return NETWORK_INTERNAL
+
     intersections = [
-        IntersectionArea(kind=str(props.get("type", "")), polygon=polygon)
+        IntersectionArea(kind=str(props.get("type", "")), polygon=polygon, network=_network_by_touch(polygon))
         for polygon, props in _localize_features(
             result.get("intersections", {}).get("features", []), zone, center_x, center_y, radius_m
         )
     ]
 
     markings = [
-        LaneMarking(kind=str(props.get("type", "")), polygon=polygon)
+        LaneMarking(kind=str(props.get("type", "")), polygon=polygon, network=_network_by_touch(polygon))
         for polygon, props in _localize_features(
             result.get("markings", {}).get("features", []), zone, center_x, center_y, radius_m
         )

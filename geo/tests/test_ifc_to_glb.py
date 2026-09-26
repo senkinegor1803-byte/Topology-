@@ -46,6 +46,7 @@ def _make_site_model() -> SiteModel:
     road = RoadRibbon(
         osm_id=2, ribbon=LineString([(-40, 0), (40, 0)]).buffer(3.0, cap_style="flat"),
         width_m=6.0, width_confidence="умолчание", surface="asphalt", highway_class="residential",
+        network="внутриквартальная",
     )
     water = WaterArea(osm_id=3, polygon=Polygon([(20, 20), (30, 20), (30, 30), (20, 30)]), level_z=99.5)
     waterway = WaterwayRibbon(osm_id=4, ribbon=LineString([(0, -40), (0, 40)]).buffer(1.5, cap_style="flat"), width_m=3.0)

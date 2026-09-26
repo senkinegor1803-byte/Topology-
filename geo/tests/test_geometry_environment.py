@@ -10,6 +10,7 @@ import pytest
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 
 from topology_geo.geometry.rail import DEFAULT_RAIL_TYPE, build_rail_ribbons
+from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import (
     CONFIDENCE_DEFAULT,
     CONFIDENCE_FACT,
@@ -17,6 +18,7 @@ from topology_geo.geometry.roads import (
     WIDTH_BY_HIGHWAY_CLASS,
     build_road_ribbons,
     compute_width_m,
+    rebuild_road_ribbon,
 )
 from topology_geo.geometry.vegetation import (
     DEFAULT_TREE_SPECIES,
@@ -83,6 +85,71 @@ def test_road_ribbon_handles_multilinestring():
 def test_build_road_ribbons_ignores_non_road_layers():
     feature = _feature("osm_buildings", Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]))
     assert build_road_ribbons([feature]) == []
+
+
+# --- каркасная/внутриквартальная сеть (Шаг 2.4, п. 1 и 5) -------------------
+
+
+def test_build_road_ribbons_classifies_backbone_and_internal_network():
+    backbone = _feature(
+        "osm_roads", LineString([(0, 0), (10, 0)]), osm_id=1, attributes={"highway_class": "primary"},
+    )
+    internal = _feature(
+        "osm_roads", LineString([(0, 0), (10, 0)]), osm_id=2, attributes={"highway_class": "residential"},
+    )
+    ribbons = {r.osm_id: r for r in build_road_ribbons([backbone, internal])}
+    assert ribbons[1].network == NETWORK_BACKBONE
+    assert ribbons[2].network == NETWORK_INTERNAL
+
+
+def test_build_road_ribbons_stores_axis_for_single_line():
+    line = LineString([(0, 0), (10, 0)])
+    feature = _feature("osm_roads", line, attributes={"highway_class": "residential"})
+    ribbons = build_road_ribbons([feature])
+    assert ribbons[0].axis == line
+
+
+def test_build_road_ribbons_axis_is_none_for_multilinestring():
+    feature = _feature(
+        "osm_roads", MultiLineString([[(0, 0), (10, 0)], [(20, 0), (30, 0)]]),
+        attributes={"highway_class": "residential"},
+    )
+    ribbons = build_road_ribbons([feature])
+    assert ribbons[0].axis is None
+
+
+def test_rebuild_road_ribbon_regenerates_geometry_from_new_axis():
+    feature = _feature(
+        "osm_roads", LineString([(0, 0), (10, 0)]),
+        attributes={"highway_class": "residential"}, raw_tags={"width": "6"},
+    )
+    road = build_road_ribbons([feature])[0]
+    new_axis = LineString([(0, 0), (0, 20)])  # тот же профиль, другое направление/длина
+
+    rebuilt = rebuild_road_ribbon(road, new_axis)
+
+    assert rebuilt.axis == new_axis
+    assert rebuilt.width_m == road.width_m  # профиль не меняется, только геометрия
+    assert rebuilt.surface == road.surface
+    assert rebuilt.network == road.network
+    assert rebuilt.ribbon.area == pytest.approx(20.0 * 6.0, rel=1e-6)  # новая длина x старая ширина
+
+
+def test_rebuild_road_ribbon_rejects_backbone_road():
+    feature = _feature("osm_roads", LineString([(0, 0), (10, 0)]), attributes={"highway_class": "primary"})
+    road = build_road_ribbons([feature])[0]
+    with pytest.raises(ValueError, match="каркасной"):
+        rebuild_road_ribbon(road, LineString([(0, 0), (0, 20)]))
+
+
+def test_rebuild_road_ribbon_rejects_road_without_stored_axis():
+    feature = _feature(
+        "osm_roads", MultiLineString([[(0, 0), (10, 0)], [(20, 0), (30, 0)]]),
+        attributes={"highway_class": "residential"},
+    )
+    road = build_road_ribbons([feature])[0]
+    with pytest.raises(ValueError, match="оси"):
+        rebuild_road_ribbon(road, LineString([(0, 0), (0, 20)]))
 
 
 # --- water ------------------------------------------------------------------

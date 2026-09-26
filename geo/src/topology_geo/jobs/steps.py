@@ -19,6 +19,7 @@ from affine import Affine
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
 from topology_geo.geometry.rail import build_rail_ribbons
+from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import build_road_ribbons
 from topology_geo.geometry.streets import StreetNetwork, build_lane_network, is_osm2streets_available
 from topology_geo.geometry.vegetation import build_individual_trees, scatter_forest_trees
@@ -151,7 +152,11 @@ def select_and_normalize(conn: Any, storage: ObjectStorage, job: store.Job) -> d
 def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     """Шаги 4-5 (Шаги 1.5-1.8): TIN участка, здания/дороги/вода/рельсы/деревья
     и сборка `site.ifc` в обеих схемах (IFC4, IFC4X3), с реестром GlobalId в
-    PostGIS (Шаг 1.8, п. 2)."""
+    PostGIS (Шаг 1.8, п. 2). Плюс (Шаг 2.4, п. 4) два дополнительных файла на
+    каждую схему — `roads_backbone_*.ifc`/`roads_internal_*.ifc`, только
+    дорожная сеть соответствующей классификации (`build_site_ifc`,
+    `road_network_filter`), каркасная помечена нередактируемой
+    (`Pset_Дорога/Полоса.Редактируемый=false`)."""
     zone = pick_msk59_zone(job.center_lon)
     center_x, center_y, _ = wgs84_to_msk59(job.center_lon, job.center_lat, zone=zone)
 
@@ -207,6 +212,31 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         key = f"jobs/{job.id}/site_{schema.lower()}.ifc"
         storage.upload(key, model.to_string().encode("utf-8"), content_type="application/x-step")
         schemas[schema] = {"storage_key": key, "product_count": len(model.by_type("IfcProduct"))}
+
+        # Каркасная и внутриквартальная сеть в отдельных файлах (Шаг 2.4,
+        # п. 4: «два независимых файла дорог», каркасная — нередактируемая,
+        # `Pset_Дорога/Полоса.Редактируемый`). Реестр GlobalId — под своим
+        # namespace `model_id`, не под общим `str(job.id)`: иначе `ON
+        # CONFLICT (model_id, layer, osm_id)` в `register_global_ids`
+        # затёр бы GlobalId комбинированного `site.ifc` выше своим (та же
+        # запись `(layer, osm_id)` встречается в обоих файлах с РАЗНЫМ
+        # GlobalId — это два разных IFC-объекта на один исходный OSM-way).
+        for network, suffix in ((NETWORK_BACKBONE, "backbone"), (NETWORK_INTERNAL, "internal")):
+            network_model, network_registry = build_site_ifc(
+                schema, site_model, base_point, road_network_filter=network
+            )
+            issues = validate_model(network_model)
+            if issues:
+                raise RuntimeError(
+                    f"roads_{suffix} ({schema}) не прошёл ifcopenshell.validate: {issues[:3]!r}"
+                )
+            register_global_ids(conn, f"{model_id}:roads_{suffix}", network_registry)
+
+            network_key = f"jobs/{job.id}/roads_{suffix}_{schema.lower()}.ifc"
+            storage.upload(
+                network_key, network_model.to_string().encode("utf-8"), content_type="application/x-step"
+            )
+            schemas[schema][f"roads_{suffix}_storage_key"] = network_key
 
     return {
         "schemas": schemas,

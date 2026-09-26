@@ -200,7 +200,11 @@ def test_full_happy_path_creates_downloadable_files(pg_test_db, tmp_path, monkey
         files = files_resp.json()["files"]
         assert {f["step_name"] for f in files} == {
             "select_osm", "prepare_relief", "select_and_normalize",
-            "assemble_ifc:IFC4", "assemble_ifc:IFC4X3", "convert_to_glb",
+            "assemble_ifc:IFC4", "assemble_ifc:IFC4X3",
+            # Каркасная/внутриквартальная сеть отдельными файлами (Шаг 2.4, п. 4)
+            "assemble_ifc:IFC4:roads_backbone", "assemble_ifc:IFC4:roads_internal",
+            "assemble_ifc:IFC4X3:roads_backbone", "assemble_ifc:IFC4X3:roads_internal",
+            "convert_to_glb",
         }
 
         glb_file = next(f for f in files if f["step_name"] == "convert_to_glb")

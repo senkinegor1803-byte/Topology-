@@ -35,6 +35,7 @@ from shapely.geometry import Point
 
 from topology_geo.geometry.buildings import BuildingSolid
 from topology_geo.geometry.rail import RailRibbon
+from topology_geo.geometry.road_network import NETWORK_INTERNAL
 from topology_geo.geometry.roads import RoadRibbon
 from topology_geo.geometry.roofs import (
     ROOF_FLAT,
@@ -304,9 +305,30 @@ def build_site_ifc(
     base_point: BasePoint,
     *,
     relief_resolution_note: str = "",
+    road_network_filter: str | None = None,
 ) -> tuple[ifcopenshell.file, GlobalIdRegistry]:
     """Собрать `site.ifc` по Шагу 1.8 (п. 1-2). Возвращает модель и список
     `(слой, osm_id, GlobalId)` для сохранения в PostGIS (`registry.py`, п. 2).
+
+    `road_network_filter` (Шаг 2.4, п. 4: «выгружать две сети в отдельные
+    файлы») — `None` (умолчание) собирает полный `site.ifc`, как раньше;
+    значение `road_network.NETWORK_BACKBONE`/`NETWORK_INTERNAL` собирает файл
+    ТОЛЬКО дорожной сети этой классификации (дороги/полосы/бордюры/
+    перекрёстки/разметка своей сети), БЕЗ зданий/воды/ж-д/деревьев И БЕЗ
+    рельефа (TIN) — сам рельеф ни к одной из двух сетей не относится, а его
+    меш на честном участке (шаг сетки 1 м, Шаг 1.5) — самая тяжёлая по
+    памяти часть сборки (сотни тысяч вершин на средний радиус); дублировать
+    его в обоих дополнительных файлах на каждую IFC-схему означало бы
+    пересобирать этот меш 6 раз за задачу вместо 2 — реальная причина OOM,
+    найденная и исправленная при разработке этого прохода, не гипотетическая
+    экономия. Полосы/дороги в отфильтрованном файле уже несут свою
+    абсолютную высоту (посадка на рельеф посчитана заранее, Шаг 2.3, п. 5) —
+    сам меш террейна для их корректного отображения не нужен, только для
+    визуальной привязки, а она и так есть в комбинированном `site.ifc`.
+    Каждая полоса/дорога уже несёт свою классификацию (`RoadRibbon.network`/
+    `LaneRibbon.network`, `geometry.road_network`), здесь только фильтр по
+    ней — вычисление не дублируется.
+
     Экспорт/валидация — у вызывающего кода (`write` /
     `topology_geo.ifc.generate_test_ifc.validate_model`)."""
     f = ifcopenshell.api.project.create_file(version=schema)
@@ -340,7 +362,7 @@ def build_site_ifc(
     registry: GlobalIdRegistry = []
     is_ifc43 = schema == "IFC4X3"
 
-    if site_model.tin is not None:
+    if site_model.tin is not None and road_network_filter is None:
         tin = site_model.tin
         verts = [tuple(float(c) for c in v) for v in tin.vertices]
         faces = [tuple(int(i) for i in tri) for tri in tin.triangles]
@@ -351,7 +373,7 @@ def build_site_ifc(
         )
         products.append(terrain)
 
-    for building in site_model.buildings:
+    for building in (site_model.buildings if road_network_filter is None else []):
         if building.roof_shape == ROOF_FLAT:
             mesh = extrude_polygon_mesh(building.footprint, building.base_z, building.base_z + building.height_m)
         else:
@@ -415,6 +437,8 @@ def build_site_ifc(
     # роднится через spatial.assign_container) с пометкой в Pset_Контекст —
     # тот же приём совместимости, что и в generate_test_ifc.py.
     for road in site_model.roads:
+        if road_network_filter is not None and road.network != road_network_filter:
+            continue
         polys = road.ribbon.geoms if road.ribbon.geom_type.startswith("Multi") else [road.ribbon]
         for poly in polys:
             mesh = flat_polygon_mesh(poly, lane_pavement_elevation_fn(poly, _terrain_elevation))
@@ -422,6 +446,8 @@ def build_site_ifc(
                 "Класс": road.highway_class,
                 "Покрытие": road.surface or "",
                 "Ширина_м": road.width_m,
+                "Сеть": road.network,
+                "Редактируемый": road.network == NETWORK_INTERNAL,
             }
             if is_ifc43:
                 product = _add_mesh_product(
@@ -448,6 +474,8 @@ def build_site_ifc(
     # только последний GlobalId на такой `osm_id` - тот же принятый компромисс
     # (реестр рассчитан на 1 запись на исходный объект, не на под-объекты).
     for lane in site_model.lanes:
+        if road_network_filter is not None and lane.network != road_network_filter:
+            continue
         mesh = flat_polygon_mesh(lane.polygon, lane_pavement_elevation_fn(lane.polygon, _terrain_elevation))
         lane_name = "Полоса " + "+".join(str(i) for i in lane.osm_way_ids)
         product = _add_mesh_product(
@@ -456,7 +484,8 @@ def build_site_ifc(
             {
                 "Pset_Полоса": {
                     "Тип": lane.lane_type, "Ширина_м": lane.width_m, "Направление": lane.direction,
-                    "Покрытие": lane.surface or "",
+                    "Покрытие": lane.surface or "", "Сеть": lane.network,
+                    "Редактируемый": lane.network == NETWORK_INTERNAL,
                 },
                 "Pset_Контекст": {"Источник": "osm2streets (Шаг 2.3, п. 1)"},
             },
@@ -466,12 +495,14 @@ def build_site_ifc(
             registry.append(("osm_roads", osm_id, product.GlobalId))
 
     for intersection in site_model.intersections:
+        if road_network_filter is not None and intersection.network != road_network_filter:
+            continue
         mesh = flat_polygon_mesh(intersection.polygon, _pavement_elevation)
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", f"Перекрёсток ({intersection.kind})", "USERDEFINED",
             mesh,
             {
-                "Pset_Перекрёсток": {"Тип": intersection.kind},
+                "Pset_Перекрёсток": {"Тип": intersection.kind, "Сеть": intersection.network},
                 "Pset_Контекст": {"Источник": "osm2streets (Шаг 2.3, п. 1)"},
             },
         )
@@ -482,19 +513,35 @@ def build_site_ifc(
     # Один продукт НА ВИД разметки (не на штрих/стрелку) - их у одного
     # перекрёстка могут быть сотни (дискретные отрезки центральной линии),
     # склеены в один меш (`_combine_meshes`), иначе site.ifc распухает от
-    # тысяч тривиальных объектов на честный участок 3 км.
+    # тысяч тривиальных объектов на честный участок 3 км. Группа по виду
+    # может содержать штрихи из обеих сетей одновременно (полный `site.ifc`,
+    # `road_network_filter=None`) - `Сеть` в Pset тогда добавляется, только
+    # если у ВСЕХ штрихов группы она одна и та же (после фильтрации по
+    # `road_network_filter` так всегда и есть - см. ниже), иначе честно
+    # опускается, а не подставляется наугад по первому попавшемуся штриху.
+    markings = (
+        site_model.markings if road_network_filter is None
+        else [m for m in site_model.markings if m.network == road_network_filter]
+    )
     markings_by_kind: dict[str, list[LaneMarking]] = {}
-    for marking in site_model.markings:
+    for marking in markings:
         markings_by_kind.setdefault(marking.kind, []).append(marking)
-    for kind, markings in markings_by_kind.items():
+    for kind, kind_markings in markings_by_kind.items():
         mesh = _combine_meshes(
-            [flat_polygon_mesh(m.polygon, lane_marking_elevation_fn(m.polygon, _terrain_elevation)) for m in markings]
+            [
+                flat_polygon_mesh(m.polygon, lane_marking_elevation_fn(m.polygon, _terrain_elevation))
+                for m in kind_markings
+            ]
         )
+        marking_pset = {"Тип": kind, "Элементов": len(kind_markings)}
+        networks = {m.network for m in kind_markings}
+        if len(networks) == 1:
+            marking_pset["Сеть"] = networks.pop()
         product = _add_mesh_product(
             f, body_context, "IfcBuildingElementProxy", f"Разметка ({kind})", "USERDEFINED",
             mesh,
             {
-                "Pset_Разметка": {"Тип": kind, "Элементов": len(markings)},
+                "Pset_Разметка": marking_pset,
                 "Pset_Контекст": {"Источник": "osm2streets (Шаг 2.3, п. 3)"},
             },
         )
@@ -503,7 +550,7 @@ def build_site_ifc(
         # да и склеены по несколько в один продукт) - не попадает в реестр,
         # как перекрёстки выше.
 
-    for water in site_model.water_areas:
+    for water in (site_model.water_areas if road_network_filter is None else []):
         # `level_fn` — реальный (не единый по всему контуру) уровень воды,
         # см. `geometry.water` (нужен для вытянутых/полномасштабных водоёмов
         # на склоне); `level_z` остаётся как представительное число для Pset.
@@ -516,7 +563,7 @@ def build_site_ifc(
         products.append(product)
         registry.append(("osm_water_areas", water.osm_id, product.GlobalId))
 
-    for waterway in site_model.waterways:
+    for waterway in (site_model.waterways if road_network_filter is None else []):
         waterway_elevation = waterway.level_fn if waterway.level_fn is not None else _terrain_elevation
         polys = waterway.ribbon.geoms if waterway.ribbon.geom_type.startswith("Multi") else [waterway.ribbon]
         for poly in polys:
@@ -528,7 +575,7 @@ def build_site_ifc(
             products.append(product)
             registry.append(("osm_waterways", waterway.osm_id, product.GlobalId))
 
-    for rail in site_model.rail:
+    for rail in (site_model.rail if road_network_filter is None else []):
         polys = rail.ballast.geoms if rail.ballast.geom_type.startswith("Multi") else [rail.ballast]
         for poly in polys:
             mesh = flat_polygon_mesh(poly, _terrain_elevation)
@@ -539,7 +586,7 @@ def build_site_ifc(
             products.append(product)
             registry.append(("osm_railways", rail.osm_id, product.GlobalId))
 
-    for i, tree in enumerate(site_model.trees):
+    for i, tree in enumerate(site_model.trees if road_network_filter is None else []):
         z = _terrain_elevation(tree.x, tree.y) or 0.0
         verts, faces = mesh_cylinder(0.15, 6.0, segments=6)
         verts = [(x + tree.x, y + tree.y, zz + z) for x, y, zz in verts]
