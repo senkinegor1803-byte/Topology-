@@ -21,6 +21,7 @@ flowchart LR
         T2["§2.3 Тайлы: кеш, стыковка, параллель<br/>tiling/*, tasks/tile_tasks.py"]:::done
         T9["§2.10 Формы крыш<br/>geometry/roofs.py"]:::done
         T10["§2.11 Части зданий/входы<br/>geometry/buildings.py"]:::done
+        T11["§2.12 Полосы через osm2streets<br/>geometry/streets.py, osm2streets/"]:::done
     end
     subgraph Заготовка
         T5["§2.6 Огибающая застройки"]:::todo
@@ -37,6 +38,7 @@ flowchart LR
     R1 -.Шаг 2.1.-> T2
     T4 -.Шаг 2.2.-> T9
     T9 -.Шаг 2.2 п.1,3.-> T10
+    T6 -.Шаг 2.3 п.1.-> T11
 
     classDef done fill:#bbf7d0,stroke:#15803d,color:#111;
     classDef todo fill:#e5e7eb,stroke:#6b7280,color:#111;
@@ -459,6 +461,53 @@ entrances(solid) = { e ∈ entrance_points : dist(e, solid.footprint) ≤ 1 м }
 Записывается в `Pset_Здание` (`Входов_всего`, `Вход_N_Тип`, `Вход_N_X_м`,
 `Вход_N_Y_м`), не как отдельная геометрия — план ограничивает объём этого
 пункта метаданными.
+
+### 2.12 Дороги по полосам через osm2streets (Шаг 2.3, п. 1) — реализовано
+
+Код: `geo/src/topology_geo/osm/raw_roads.py`, `geo/src/topology_geo/geometry/streets.py`,
+`geo/osm2streets/`. Тесты: `geo/tests/test_osm_raw_roads.py`,
+`geo/tests/test_geometry_streets.py`, `geo/tests/test_pipeline_streets.py`
+(сквозной прогон). Подробное объяснение решения — `docs/streets.md`.
+
+Сама геометрия полос (ширина проезжей части/тротуара, положение относительно
+оси, площадки перекрёстков) — не формула этого проекта, а выход реального
+инструмента osm2streets (A/B Street); здесь только два расчёта до и после
+вызова:
+
+**Восстановление связности узлов** (без него osm2streets не видит
+перекрёстки, `osm2pgsql`, Шаг 1.1, её не хранит):
+
+```
+osm_roads.nodes[i] = ID i-й вершины geom (сохранено при импорте, style.lua)
+
+build_osm_xml(roads) = <node> на каждый уникальный ID узла (первое
+                        попавшееся (lon, lat) для этого ID) +
+                        <way> с исходными tags на каждую дорогу,
+                        <nd ref=...> в порядке nodes
+```
+
+Общий ID узла на нескольких `<way>` — топологический перекрёсток; узлы
+объявляются раньше всех way (порядок, ожидаемый большинством OSM-парсеров,
+тот же приём, что синтетические `.osm`-фикстуры Шага 1.1).
+
+**Clip-полигон буфера** (граница, в которой osm2streets строит сеть) —
+окружность в WGS-84, точная, не наивный градусный отступ:
+
+```
+circle_wgs84(lon, lat, r) = { msk59_to_wgs84(p) : p ∈ Point(wgs84_to_msk59(lon, lat)).buffer(r) }
+```
+
+Тот же принцип точности, что и `clip.py`/`jobs.steps._wgs84_bbox_for_radius`
+(буферизация в метрах МСК-59, а не в градусах, которые искажаются с
+широтой). Результат osm2streets (GeoJSON, WGS-84) репроецируется обратно
+в МСК-59 и локальные координаты участка той же цепочкой, что остальные
+слои (`transform_geometry_to_msk59` → `clip_and_localize`, Шаг 1.4).
+
+Инструмент существует только как Rust/WASM (`osm2streets-js`) — вызывается
+отдельным процессом Node.js (`geo/osm2streets/convert.mjs`), тем же приёмом,
+что системный `osm2pgsql`. Честный водопад (как `NullOvertureSource`,
+§2.5): если `node`/пакет недоступны в окружении (`is_osm2streets_available`),
+участок остаётся с одной лентой на дорогу (§2.7, `RoadRibbon`), не падает.
 
 ## 3. Как обновлять этот документ
 

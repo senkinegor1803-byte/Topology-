@@ -7,6 +7,9 @@ venv/
 .ruff_cache/
 *.ifc.bak
 
+# Шаг 2.3: osm2streets-js (Node.js) - node_modules не в git, package-lock.json остаётся
+node_modules/
+
 # Local env / secrets
 .env
 *.env.local

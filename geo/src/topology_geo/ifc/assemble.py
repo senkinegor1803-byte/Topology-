@@ -41,6 +41,7 @@ from topology_geo.geometry.roofs import (
     build_pitched_building_mesh,
     oriented_bounding_box,
 )
+from topology_geo.geometry.streets import IntersectionArea, LaneRibbon
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.relief.tin import SiteTin
@@ -63,6 +64,8 @@ class SiteModel:
     waterways: list[WaterwayRibbon] = field(default_factory=list)
     rail: list[RailRibbon] = field(default_factory=list)
     trees: list[TreePoint] = field(default_factory=list)
+    lanes: list[LaneRibbon] = field(default_factory=list)
+    intersections: list[IntersectionArea] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -328,6 +331,41 @@ def build_site_ifc(
                 )
                 products.append(product)
             registry.append(("osm_roads", road.osm_id, product.GlobalId))
+
+    # Полосы (Шаг 2.3, п. 1, `geometry.streets`) - независимый от `roads`
+    # слой ДЕТАЛИЗАЦИИ того же `highway=*`: несколько полос на один
+    # `osm_way_id` (проезжая часть х2 + тротуары), поэтому, как и для
+    # многосегментных `road.ribbon`/`waterway.ribbon` выше, в реестр попадает
+    # только последний GlobalId на такой `osm_id` - тот же принятый компромисс
+    # (реестр рассчитан на 1 запись на исходный объект, не на под-объекты).
+    for lane in site_model.lanes:
+        mesh = flat_polygon_mesh(lane.polygon, _terrain_elevation)
+        lane_name = "Полоса " + "+".join(str(i) for i in lane.osm_way_ids)
+        product = _add_mesh_product(
+            f, body_context, "IfcBuildingElementProxy", lane_name, "USERDEFINED",
+            mesh,
+            {
+                "Pset_Полоса": {"Тип": lane.lane_type, "Ширина_м": lane.width_m, "Направление": lane.direction},
+                "Pset_Контекст": {"Источник": "osm2streets (Шаг 2.3, п. 1)"},
+            },
+        )
+        products.append(product)
+        for osm_id in lane.osm_way_ids:
+            registry.append(("osm_roads", osm_id, product.GlobalId))
+
+    for intersection in site_model.intersections:
+        mesh = flat_polygon_mesh(intersection.polygon, _terrain_elevation)
+        product = _add_mesh_product(
+            f, body_context, "IfcBuildingElementProxy", f"Перекрёсток ({intersection.kind})", "USERDEFINED",
+            mesh,
+            {
+                "Pset_Перекрёсток": {"Тип": intersection.kind},
+                "Pset_Контекст": {"Источник": "osm2streets (Шаг 2.3, п. 1)"},
+            },
+        )
+        products.append(product)
+        # не из одного OSM-объекта (перекрёсток собран из нескольких way) -
+        # нет естественного osm_id, в реестр не попадает (как и рельеф/TIN выше).
 
     for water in site_model.water_areas:
         mesh = flat_polygon_mesh(water.polygon, lambda x, y, z=water.level_z: z)

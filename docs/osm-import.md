@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | `osm_buildings` | polygon/multipolygon | `building=*` (way, и multipolygon-отношения) |
 | `osm_building_parts` | polygon | `building:part=*` (way, Шаг 2.2, п. 1) |
-| `osm_roads` | linestring | `highway=*` |
+| `osm_roads` | linestring | `highway=*`; доп. колонка `nodes` (jsonb, массив ID узлов way в порядке вершин `geom`) — Шаг 2.3, п. 1 |
 | `osm_railways` | linestring | `railway=*` |
 | `osm_water_areas` | polygon/multipolygon | `natural=water`, `landuse=reservoir` |
 | `osm_waterways` | linestring | `waterway=*` |
@@ -26,6 +26,14 @@
 сопоставление контур↔части делается пространственно позже, на генераторе
 зданий (Шаг 2.2, п. 1/3, `topology_geo.geometry.buildings.extrude_buildings`), не на
 импорте.
+
+`osm_roads.nodes` — единственная колонка в этом стиле, где `osm2pgsql` не
+просто откладывает интерпретацию тегов на потом, а сохраняет то, что иначе
+теряется безвозвратно: связность узлов между дорогами (общий ID узла на
+перекрёстке). Нужна для полос через osm2streets (Шаг 2.3, п. 1,
+`topology_geo.osm.raw_roads`/`topology_geo.geometry.streets`) — этому
+инструменту, в отличие от остальных генераторов Шагов 1.6-1.7, недостаточно
+итоговой геометрии+тегов одного way, требуется настоящий граф перекрёстков.
 
 Каждая геометрическая таблица получает GIST-индекс на `geom` автоматически
 (поведение osm2pgsql flex по умолчанию — проверено локальным прогоном, не

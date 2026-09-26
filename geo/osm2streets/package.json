@@ -1,0 +1,10 @@
+{
+  "name": "topology-osm2streets",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Обёртка над osm2streets-js для получения геометрии полос/тротуаров/перекрёстков (Шаг 2.3, п. 1)",
+  "type": "module",
+  "dependencies": {
+    "osm2streets-js": "0.1.4"
+  }
+}

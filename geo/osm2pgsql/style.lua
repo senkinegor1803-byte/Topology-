@@ -19,25 +19,38 @@
 -- `osm_building_parts`, тем же способом, что и `osm_buildings`; по конвенции
 -- OSM (wiki: Key:building:part) это разные теги на разных объектах, way с
 -- `building:part` в этом стиле не проверяется на `building` (см.
--- `process_way`). `entrance=*` (Шаг 2.2, п. 1/3) — точки, `osm_entrances`.
+-- `process_way`). `entrance=*` (Шаг 2.2, п. 3) — точки, `osm_entrances`.
+--
+-- `osm_roads.nodes` (Шаг 2.3, п. 1) — доп. колонка с массивом ID узлов way
+-- (`object.nodes`, тот же порядок, что и вершины `geom`) поверх обычного
+-- набора tags/geom. Нужна, чтобы позже (`topology_geo.osm.raw_roads`) при
+-- построении полос через osm2streets восстановить настоящий граф узлов
+-- (общий ID узла на перекрёстке = топологическая связь), не имея доступа к
+-- исходному .osm/.pbf повторно — osm2pgsql его не хранит, а разложенные по
+-- отдельным объектам геометрия/теги в PostGIS сами по себе связность не
+-- сохраняют.
 
 local srid = 4326
 
-local function def_table(name, geom_type)
+local function def_table(name, geom_type, extra_columns)
+    local columns = {
+        { column = 'tags', type = 'jsonb' },
+        { column = 'geom', type = geom_type, projection = srid, not_null = true },
+    }
+    for _, c in ipairs(extra_columns or {}) do
+        columns[#columns + 1] = c
+    end
     return osm2pgsql.define_table({
         name = name,
         ids = { type = 'any', id_column = 'osm_id', type_column = 'osm_type' },
-        columns = {
-            { column = 'tags', type = 'jsonb' },
-            { column = 'geom', type = geom_type, projection = srid, not_null = true },
-        },
+        columns = columns,
     })
 end
 
 local tables = {
     buildings = def_table('osm_buildings', 'geometry'),       -- полигоны/мультиполигоны
     building_parts = def_table('osm_building_parts', 'geometry'), -- building:part=*, полигоны (Шаг 2.2, п. 1)
-    roads = def_table('osm_roads', 'linestring'),
+    roads = def_table('osm_roads', 'linestring', { { column = 'nodes', type = 'jsonb' } }),
     railways = def_table('osm_railways', 'linestring'),
     water_areas = def_table('osm_water_areas', 'geometry'),    -- полигоны/мультиполигоны
     waterways = def_table('osm_waterways', 'linestring'),
@@ -108,7 +121,7 @@ function osm2pgsql.process_way(object)
     end
 
     if tags.highway then
-        insert_way_geom(tables.roads, object, false)
+        tables.roads:insert({ tags = tags, nodes = object.nodes, geom = object:as_linestring() })
         return
     end
 

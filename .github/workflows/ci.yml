@@ -48,8 +48,19 @@ jobs:
         with:
           python-version: "3.11"
 
+      - uses: actions/setup-node@v4
+        # Шаг 2.3: osm2streets-js (Rust/WASM) существует только как
+        # npm-пакет (geo/osm2streets/, geo/tests/test_geometry_streets.py,
+        # geo/tests/test_pipeline_streets.py).
+        with:
+          node-version: "22"
+
       - name: Install osm2pgsql
         run: sudo apt-get update && sudo apt-get install -y osm2pgsql
+
+      - name: Install osm2streets-js
+        working-directory: geo/osm2streets
+        run: npm install
 
       - name: Install geo package (dev)
         working-directory: geo

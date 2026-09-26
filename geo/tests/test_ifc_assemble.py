@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Polygon
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
 from topology_geo.geometry.rail import RailRibbon
 from topology_geo.geometry.roads import RoadRibbon
+from topology_geo.geometry.streets import IntersectionArea, LaneRibbon
 from topology_geo.geometry.vegetation import TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.ifc.assemble import (
@@ -234,6 +235,48 @@ def test_build_site_ifc_plain_building_has_no_part_marker_in_context_pset():
     f, _ = build_site_ifc("IFC4", _make_site_model(), BASE_POINT)
     psets = _psets_of(f, lambda name: name.startswith("Здание"))
     assert "Часть_здания" not in psets["Pset_Контекст"]
+
+
+def _psets_of_proxy_by_name(model, name: str) -> dict:
+    element = next(e for e in model.by_type("IfcBuildingElementProxy") if e.Name == name)
+    return {
+        rel.RelatingPropertyDefinition.Name: {
+            prop.Name: prop.NominalValue.wrappedValue for prop in rel.RelatingPropertyDefinition.HasProperties
+        }
+        for rel in element.IsDefinedBy
+        if rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
+    }
+
+
+def test_build_site_ifc_writes_lane_and_intersection_properties():
+    lane = LaneRibbon(
+        osm_way_ids=(10, 11), lane_type="Driving", width_m=3.0, direction="Fwd",
+        polygon=Polygon([(-5, -1), (5, -1), (5, 1), (-5, 1)]),
+    )
+    intersection = IntersectionArea(kind="sidewalk corner", polygon=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]))
+    model = SiteModel(lanes=[lane], intersections=[intersection])
+
+    f, registry = build_site_ifc("IFC4", model, BASE_POINT)
+    assert validate_model(f) == []
+
+    lane_psets = _psets_of_proxy_by_name(f, "Полоса 10+11")
+    assert lane_psets["Pset_Полоса"] == {"Тип": "Driving", "Ширина_м": 3.0, "Направление": "Fwd"}
+
+    inter_psets = _psets_of_proxy_by_name(f, "Перекрёсток (sidewalk corner)")
+    assert inter_psets["Pset_Перекрёсток"] == {"Тип": "sidewalk corner"}
+
+    # одна полоса с несколькими osm_way_ids -> запись реестра на каждый way
+    # (тот же принятый компромисс, что и многосегментные road.ribbon/waterway.ribbon).
+    assert set(registry) == {
+        ("osm_roads", 10, next(e for e in f.by_type("IfcBuildingElementProxy") if e.Name == "Полоса 10+11").GlobalId),
+        ("osm_roads", 11, next(e for e in f.by_type("IfcBuildingElementProxy") if e.Name == "Полоса 10+11").GlobalId),
+    }
+
+
+def test_build_site_ifc_intersection_has_no_registry_entry():
+    intersection = IntersectionArea(kind="sidewalk corner", polygon=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]))
+    _, registry = build_site_ifc("IFC4", SiteModel(intersections=[intersection]), BASE_POINT)
+    assert registry == []  # нет естественного osm_id - как и у TIN/рельефа
 
 
 def test_build_site_ifc_uses_native_ifcroad_in_ifc43():

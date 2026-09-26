@@ -16,14 +16,15 @@
 ```
 geo/            Python-пакет конвейера геоданных (PostGIS, IFC, OSM, рельеф)
   osm2pgsql/style.lua  флекс-стиль импорта OSM (Шаг 1.1)
+  osm2streets/     Node.js-обёртка над osm2streets-js (полосы, Шаг 2.3, п. 1)
   sql/             SQL-миграции (служебные таблицы)
   scripts/         обёртки импорта/обновления OSM
   src/topology_geo/
     coords.py       пересчёт координат и высот (МСК-59, EGM96 -> Балтийская)
     ifc/             генерация, сборка (site.ifc), IFC -> GLB, валидация, реестр GlobalId
-    geometry/        здания/дороги/вода/рельсы/деревья участка, формы крыш (Шаги 1.6-1.7, 2.2)
+    geometry/        здания/дороги/вода/рельсы/деревья участка, формы крыш (Шаги 1.6-1.7, 2.2), полосы (Шаг 2.3)
     web/viewer/      статическая страница-вьюер (three.js, Шаг 1.9)
-    osm/             импорт, журнал источников, запросы, аудит полноты OSM
+    osm/             импорт, журнал источников, запросы, аудит полноты OSM, восстановление графа узлов дорог (Шаг 2.3)
     relief/          репроекция, высоты, COG, слияние, покрытие, get_dem, TIN участка
     selection/       выборка, обрезка, нормализация, GeoPackage (Шаг 1.4)
     jobs/            модель задач, движок пайплайна, реальные шаги (Шаг 1.3)
@@ -66,12 +67,16 @@ celery -A topology_geo.tasks.celery_app worker --loglevel=info  # воркер
 Выборка и нормализация данных участка (Шаг 1.4) — см.
 [docs/selection.md](docs/selection.md). Протокол приёмки Этапа 1 (Шаг 1.10,
 сквозной тест на 3 профилях участка) — см.
-[docs/stage1-acceptance.md](docs/stage1-acceptance.md).
+[docs/stage1-acceptance.md](docs/stage1-acceptance.md). Дороги по полосам
+через osm2streets (Шаг 2.3, п. 1) — см. [docs/streets.md](docs/streets.md)
+(`cd geo/osm2streets && npm install`).
 
 Интеграционные тесты Шагов 1.1-1.10 требуют системный `osm2pgsql`
 (`apt-get install osm2pgsql`), доступные Postgres+PostGIS и Redis, и Chromium
 для теста вьюера (`playwright install chromium`) — без них соответствующие
-тесты пропускаются, но реально прогоняются в CI.
+тесты пропускаются, но реально прогоняются в CI. Тесты Шага 2.3 дополнительно
+требуют `node` и `npm install` в `geo/osm2streets/` — см.
+[docs/streets.md](docs/streets.md).
 
 ## Роли и участие AI
 
