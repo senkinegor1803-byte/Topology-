@@ -38,7 +38,7 @@ from topology_geo.selection.geopackage import dataset_to_geopackage_bytes
 from topology_geo.selection.service import select_site_data
 from topology_geo.storage import ObjectStorage
 
-RELIEF_PIXEL_SIZE_M = 10.0
+RELIEF_PIXEL_SIZE_M = 1.0
 RELIEF_MARGIN_M = 200.0
 IFC_SCHEMAS = ("IFC4", "IFC4X3")
 
