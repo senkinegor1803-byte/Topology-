@@ -15,6 +15,44 @@
 вырожденные (нулевой площади) грани возможны только от дублирующихся или
 коллинеарных точек — от них избавляется дедупликация координат на входе,
 контроль после триангуляции — `find_degenerate_triangles`.
+
+Фоновый рельеф — регулярная квадратная сетка («метод квадратных призм»
+инженерной геодезии: каждая ячейка сетки — квадрат в плане, вершины несут
+отметку, два треугольника Делоне на ячейку и есть развёртка призмы по
+диагонали). Шаг сетки по умолчанию — 1 м (`background_step_m`): крупнее
+нельзя — при бо́льшем шаге треугольники фоновой сетки становятся заметны
+как грани («артефакты») при плоском затенении в вебвьюере (Шаг 1.9), и
+крупная ячейка срезает точность точечных источников (топосъёмка) ещё до
+TIN (см. `docs/relief.md`). После сэмплирования сетки — «многоструктурное»
+сглаживание (`smooth_grid_elevations`): фон сглаживается 2D-скользящим
+средним отдельно от дороги (та сглаживается своим 1D-скользящим средним
+вдоль оси, `_smoothed_profile`) и отдельно от воды/зданий (их отметка —
+константа по контуру, точная по построению, сглаживанию не подлежит:
+это единственное, что гарантирует критерий «≤0.1 м» для дороги и ровную
+площадку у здания/воды). Сглаживание фона не смещает наклонную плоскость
+(среднее линейной функции по симметричному окну равно её значению в
+центре) — оно убирает высокочастотный шум/ступеньки источника (например,
+интерполяцию грубого TessaDEM на мелкую сетку), не искажая форму рельефа.
+
+ВАЖНОЕ ОГРАНИЧЕНИЕ МАСШТАБА (измерено реальным прогоном, не оценка):
+`build_site_tin` строит ОДИН несвязанный (не тайловый) `scipy.spatial.Delaunay`
+на все точки участка сразу — при шаге фона 1 м это нормально на радиусе
+Шага 1.5/MVP (500 м, `docs/plan.md`: ~784 тыс. точек, ~14 с, ~1.5 ГБ пиковой
+памяти), но НЕ масштабируется на весь диапазон, который разрешает валидация
+API (`radius_m` 500-3000 м, `api/schemas.py`): на 1,5 км (~7 млн точек)
+процесс уже потреблял >12 ГБ и продолжал расти к моменту, когда пришлось
+прервать прогон, чтобы не уронить среду; на 3 км (~28 млн точек) это
+заведомо хуже. Дело не в качестве реализации (фон уже отдаётся сырыми numpy-
+массивами, не `TinPoint`, дедуп не гоняется по фону вовсе) — сам `Delaunay`
+на триангуляции такого размера требует память, которую разумно закладывать
+только под настоящий кластер. Для полного радиуса 3 км в проекте уже есть
+масштабируемое решение — Шаг 2.1 (`tiling/terrain.py`): тот же принцип
+призм+сглаживания, но по тайлам 250×250 м (по 62,5 тыс. точек на тайл
+независимо от общего радиуса модели, реально параллелится Celery). Поэтому
+`build_site_tin` отказывает явной ошибкой при риске такого объёма
+(`max_background_points`), а не падает по OOM где-то в середине —
+падение по памяти в процессе Celery-воркера может увести с собой ДРУГИЕ,
+не связанные с этой задачей, если воркер общий.
 """
 
 from __future__ import annotations
@@ -22,13 +60,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import shapely
+from scipy.ndimage import uniform_filter
 from scipy.spatial import Delaunay
 from shapely.geometry import LineString, Point
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 
 from topology_geo.relief.service import Grid
 
 DEGENERATE_AREA_EPS_M2 = 1e-6
+
+# Безопасный потолок точек фоновой сетки для НЕтайлового `Delaunay` одним
+# куском (см. докстринг модуля, раздел «важное ограничение масштаба») — при
+# шаге 1 м это соответствует радиусу участка ~800 м, с запасом выше
+# протестированных 500 м MVP (Шаг 1.5/Этап 1) и с большим запасом ниже
+# радиуса (~1,5 км), на котором реальный прогон уже уходил за 12 ГБ.
+MAX_BACKGROUND_POINTS_UNTILED = 2_000_000
 
 
 def sample_bilinear(values: np.ndarray, grid: Grid, world_x: float, world_y: float) -> float | None:
@@ -54,6 +102,65 @@ def sample_bilinear(values: np.ndarray, grid: Grid, world_x: float, world_y: flo
     top = v00 * (1 - fc) + v01 * fc
     bottom = v10 * (1 - fc) + v11 * fc
     return float(top * (1 - fr) + bottom * fr)
+
+
+def sample_bilinear_grid(values: np.ndarray, grid: Grid, world_x: np.ndarray, world_y: np.ndarray) -> np.ndarray:
+    """Векторизованный аналог `sample_bilinear` (те же условности, включая
+    полупиксельную поправку) для массива точек сразу — точка вне растра даёт
+    `nan` вместо `None`. Фоновая сетка на шаге 1 м даёт от сотен тысяч до
+    десятков миллионов точек (Шаг 1.5 на радиусе 3 км, Шаг 2.1 по всем тайлам)
+    — поточечный Python-цикл там на порядки медленнее векторного numpy."""
+    col = (world_x - grid.transform.c) / grid.transform.a - 0.5
+    row = (world_y - grid.transform.f) / grid.transform.e - 0.5
+    inside = (col >= 0) & (row >= 0) & (col <= grid.width - 1) & (row <= grid.height - 1)
+
+    c0 = np.floor(col).astype(np.int64)
+    r0 = np.floor(row).astype(np.int64)
+    c0c = np.clip(c0, 0, grid.width - 1)
+    r0c = np.clip(r0, 0, grid.height - 1)
+    c1 = np.clip(c0 + 1, 0, grid.width - 1)
+    r1 = np.clip(r0 + 1, 0, grid.height - 1)
+    fc = col - c0
+    fr = row - r0
+
+    v00, v01 = values[r0c, c0c], values[r0c, c1]
+    v10, v11 = values[r1, c0c], values[r1, c1]
+    top = v00 * (1 - fc) + v01 * fc
+    bottom = v10 * (1 - fc) + v11 * fc
+    result = top * (1 - fr) + bottom * fr
+
+    out = np.full(world_x.shape, np.nan)
+    out[inside] = result[inside]
+    return out
+
+
+def smooth_grid_elevations(elevations: np.ndarray, window_cells: int) -> np.ndarray:
+    """Скользящее среднее по регулярной 2D-сетке отметок фона («многоструктурное
+    сглаживание», п. 5 плана, для фонового рельефа — дорога/вода/здания
+    сглаживаются отдельно от фона своими правилами, см. докстринг модуля).
+
+    `nan` (нет покрытия DEM) исключается из среднего по соседям явно —
+    наивный `uniform_filter` по массиву с `nan`, замененным на 0, размыл бы
+    её как «низкую точку» в соседние валидные ячейки. Чётный `window_cells`
+    смещает центр окна на полъячейки (несимметрично) — округляется вверх до
+    нечётного, иначе сглаживание плоскости давало бы систематическую ошибку
+    вместо точного среднего в центре окна.
+    """
+    if window_cells <= 1:
+        return elevations
+    if window_cells % 2 == 0:
+        window_cells += 1
+
+    valid = ~np.isnan(elevations)
+    if not valid.any():
+        return elevations
+
+    filled = np.where(valid, elevations, 0.0)
+    mean_filled = uniform_filter(filled, size=window_cells, mode="nearest")
+    mean_valid = uniform_filter(valid.astype(np.float64), size=window_cells, mode="nearest")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        smoothed = np.where(mean_valid > 0, mean_filled / mean_valid, np.nan)
+    return smoothed
 
 
 @dataclass(frozen=True)
@@ -110,19 +217,90 @@ def _dedupe_points(points: list[TinPoint], tol: float = 0.01) -> list[TinPoint]:
     return kept
 
 
-def _background_grid(radius_m: float, step: float, exclude: list[BaseGeometry]) -> list[tuple[float, float]]:
+def _fill_polygon_flat(poly: BaseGeometry, z: float, step: float, source: str) -> list[TinPoint]:
+    """Точки на постоянной отметке `z` внутри `poly` (не только на контуре) —
+    без них плоская площадка здания/уреза воды не гарантированно остаётся
+    плоской: несвязанная (не constrained) триангуляция Делоне может
+    «перепрыгнуть» пустую внутренность контура треугольником из соседних
+    фоновых точек СНАРУЖИ, если они расположены достаточно плотно (вскрылось
+    при переходе фона на шаг 1 м, Шаг 1.5 — раньше фон был реже контуров
+    типичного здания и такой треугольник Делоне не строил)."""
+    minx, miny, maxx, maxy = poly.bounds
+    xs = np.arange(minx + step / 2, maxx, step)
+    ys = np.arange(miny + step / 2, maxy, step)
+    if len(xs) == 0 or len(ys) == 0:
+        return []
+    gx, gy = np.meshgrid(xs, ys, indexing="ij")
+    inside = shapely.contains_xy(poly, gx, gy)
+    return [TinPoint(float(x), float(y), z, source) for x, y in zip(gx[inside], gy[inside])]
+
+
+def _smoothed_background_arrays(
+    radius_m: float,
+    step: float,
+    exclude: list[BaseGeometry],
+    relief_values: np.ndarray,
+    relief_grid: Grid,
+    center_x: float,
+    center_y: float,
+    *,
+    smoothing_window_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Точки фонового рельефа — квадратная сетка с шагом `step` (призмы,
+    см. докстринг модуля), отметки сглажены `smooth_grid_elevations` ДО
+    вырезания зон дорог/воды/зданий (сглаживание должно видеть реальный
+    рельеф под ними, а не дыру — иначе съедет ближайший к границе фон).
+
+    Возвращает СЫРЫЕ numpy-массивы (x, y, z), не `list[TinPoint]`: при шаге
+    1 м у радиуса 3 км это ~28 млн точек — миллионы Python-объектов
+    (`TinPoint`) и последующий поэлементный `_dedupe_points` (словарь на
+    Python) на таком объёме исчерпывают память (проверено реальным прогоном
+    — процесс убит OOM на радиусе 1,5 км). Фон не нуждается в дедупликации
+    вовсе: это точная сетка без внутренних дублей, а с точками дорог/воды/
+    зданий он не пересекается по построению (`excluded_mask` ниже вырезает
+    там фон уже на этом шаге, геометрически) — `build_site_tin` склеивает
+    результат с (небольшим) списком приоритетных точек напрямую массивами.
+
+    Сетка для сглаживания строится ШИРЕ радиуса участка на половину окна
+    (`pad`) и обрезается обратно после — иначе у точек ближе к радиусу, чем
+    половина окна, `smooth_grid_elevations` (`mode="nearest"`) повторяла бы
+    крайний семпл вместо реального соседнего пикселя растра, а на наклонной
+    плоскости это даёт систематическое смещение (тот же эффект, что и
+    несимметричное окно в `_smoothed_profile` — тут вместо линейной
+    экстраполяции просто берётся реальный запас растра, `RELIEF_MARGIN_M`
+    в `jobs/steps.py`, он для этого и больше окна сглаживания)."""
     n = int(np.ceil(radius_m / step))
-    pts = []
-    for i in range(-n, n + 1):
-        for j in range(-n, n + 1):
-            x, y = i * step, j * step
-            if x * x + y * y > radius_m * radius_m:
-                continue
-            point = Point(x, y)
-            if any(zone.contains(point) for zone in exclude):
-                continue
-            pts.append((x, y))
-    return pts
+    window_cells = max(round(smoothing_window_m / step), 1)
+    if window_cells % 2 == 0:
+        window_cells += 1
+    pad = window_cells // 2
+
+    idx = np.arange(-n - pad, n + pad + 1) * step
+    padded_x, padded_y = np.meshgrid(idx, idx, indexing="ij")
+
+    raw = sample_bilinear_grid(relief_values, relief_grid, center_x + padded_x, center_y + padded_y)
+    smoothed_padded = smooth_grid_elevations(raw, window_cells)
+    del raw
+
+    hi = padded_x.shape[0] - pad
+    local_x = padded_x[pad:hi, pad:hi]
+    local_y = padded_y[pad:hi, pad:hi]
+    smoothed = smoothed_padded[pad:hi, pad:hi]
+    del padded_x, padded_y, smoothed_padded
+
+    inside_circle = local_x * local_x + local_y * local_y <= radius_m * radius_m
+    if exclude:
+        # `intersects_xy`, не `contains_xy`: на шаге 1 м фоновая точка регулярно
+        # попадает ТОЧНО на границу здания/воды (не только на угол) — строгий
+        # `contains` (только внутренность) её не исключил бы, и точка с
+        # реальной (не плоской) отметкой рельефа встала бы в триангуляцию
+        # рядом с плоской площадкой здания/уреза воды, испортив её плоскостность.
+        excluded_mask = shapely.intersects_xy(unary_union(exclude), local_x, local_y)
+    else:
+        excluded_mask = np.zeros_like(inside_circle, dtype=bool)
+    keep = inside_circle & ~excluded_mask & ~np.isnan(smoothed)
+
+    return local_x[keep], local_y[keep], smoothed[keep]
 
 
 def _smoothed_profile(line: LineString, elevation_fn, *, step: float, window_m: float) -> list[tuple[float, float, float]]:
@@ -176,16 +354,35 @@ def build_site_tin(
     radius_m: float,
     features: list,
     *,
-    background_step_m: float = 25.0,
-    road_step_m: float = 5.0,
+    background_step_m: float = 1.0,
+    background_smoothing_window_m: float = 5.0,
+    road_step_m: float = 1.0,
     road_smoothing_window_m: float = 30.0,
     road_default_width_m: float = 6.0,
+    max_background_points: int = MAX_BACKGROUND_POINTS_UNTILED,
 ) -> SiteTin:
     """Построить TIN участка радиуса `radius_m` (локальные координаты, центр
     (0,0)) из растра рельефа `relief_values`/`relief_grid` (мировые МСК-59
     координаты), врезав дороги/воду/здания из `features` (Шаг 1.4 — объекты
     уже в локальных координатах участка).
+
+    `max_background_points` — предохранитель от OOM на большом радиусе (см.
+    докстринг модуля): при `background_step_m=1.0` это ограничивает
+    практический радиус этой (нетайловой) функции; для радиуса, на который
+    рассчитан весь диапазон API (до 3 км), нужен тайловый путь Шага 2.1
+    (`tiling.terrain.build_tile_terrain`), не эта функция напрямую.
     """
+    n = int(np.ceil(radius_m / background_step_m))
+    projected_background_points = (2 * n + 1) ** 2
+    if projected_background_points > max_background_points:
+        raise ValueError(
+            f"радиус {radius_m:.0f} м с шагом фона {background_step_m:.2f} м даёт "
+            f"~{projected_background_points:,} точек фона — выше безопасного предела "
+            f"{max_background_points:,} для нетайлового TIN одним куском (реальный прогон "
+            "на таком объёме уходит в OOM, см. докстринг модуля); для этого радиуса нужен "
+            "тайловый путь Шага 2.1 (tiling.terrain.build_tile_terrain), а не build_site_tin "
+            "напрямую"
+        )
 
     def elevation_fn(local_x: float, local_y: float) -> float | None:
         return sample_bilinear(relief_values, relief_grid, center_x + local_x, center_y + local_y)
@@ -227,6 +424,7 @@ def build_site_tin(
             water_level = min(levels) if levels else 0.0
             for x, y in poly.exterior.coords:
                 points.append(TinPoint(x, y, water_level, "water"))
+            points.extend(_fill_polygon_flat(poly, water_level, background_step_m, "water"))
 
     for feature in buildings:
         geom = feature.geometry
@@ -240,18 +438,30 @@ def build_site_tin(
             pad_level = min(levels) if levels else 0.0
             for x, y in poly.exterior.coords:
                 points.append(TinPoint(x, y, pad_level, "building"))
+            points.extend(_fill_polygon_flat(poly, pad_level, background_step_m, "building"))
 
-    for x, y in _background_grid(radius_m, background_step_m, exclude_zones):
-        z = elevation_fn(x, y)
-        if z is not None:
-            points.append(TinPoint(x, y, z, "terrain"))
+    points = _dedupe_points(points)  # только приоритетные (дорога/вода/здание) — их немного, дедуп дешёвый
 
-    points = _dedupe_points(points)
-    if len(points) < 3:
+    bg_x, bg_y, bg_z = _smoothed_background_arrays(
+        radius_m, background_step_m, exclude_zones, relief_values, relief_grid, center_x, center_y,
+        smoothing_window_m=background_smoothing_window_m,
+    )
+    # Фон не дедуплицируется с приоритетными точками поэлементно (см.
+    # докстринг `_smoothed_background_arrays` — на 28 млн точек это то, что
+    # исчерпывает память): `excluded_mask` там уже вырезал фон из зон дорог/
+    # воды/зданий геометрически, точного совпадения координат быть не должно.
+    if points:
+        priority_xy = np.array([(p.x, p.y) for p in points], dtype=np.float64)
+        priority_z = np.array([p.z for p in points], dtype=np.float64)
+        xy = np.vstack([priority_xy, np.column_stack([bg_x, bg_y])])
+        z = np.concatenate([priority_z, bg_z])
+    else:
+        xy = np.column_stack([bg_x, bg_y])
+        z = bg_z
+
+    if len(xy) < 3:
         raise ValueError("недостаточно точек для построения TIN участка")
 
-    xy = np.array([(p.x, p.y) for p in points])
-    z = np.array([p.z for p in points])
     delaunay = Delaunay(xy)
     vertices = np.column_stack([xy, z])
 

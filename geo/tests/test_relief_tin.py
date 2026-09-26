@@ -23,6 +23,8 @@ from topology_geo.relief.tin import (
     find_degenerate_triangles,
     max_deviation_along_line,
     sample_bilinear,
+    sample_bilinear_grid,
+    smooth_grid_elevations,
 )
 from topology_geo.selection.service import SiteFeature
 
@@ -136,3 +138,104 @@ def test_build_site_tin_raises_with_too_few_points():
     values, grid = _make_planar_grid()
     with pytest.raises(ValueError):
         build_site_tin(values, grid, CENTER_X, CENTER_Y, radius_m=1.0, features=[], background_step_m=1000.0)
+
+
+def test_build_site_tin_rejects_radius_beyond_untiled_memory_limit():
+    """Предохранитель от OOM (докстринг модуля): нетайловый `Delaunay` на шаге
+    1 м не тянет большой радиус (реальный прогон на ~7 млн точек уходил за
+    12 ГБ) — функция обязана отказать СРАЗУ понятной ошибкой, а не зависнуть
+    или упасть по памяти где-то в середине. Проверяем именно это — что отказ
+    происходит ДО построения гигантской сетки (`background_step_m` не тронут,
+    значит, при радиусе 3 км с шагом 1 м она обязана отказать быстро)."""
+    values, grid = _make_planar_grid()
+    with pytest.raises(ValueError, match="выше безопасного предела"):
+        build_site_tin(values, grid, CENTER_X, CENTER_Y, radius_m=3000.0, features=[])
+
+
+def test_background_grid_default_step_is_one_metre():
+    """«Метод квадратных призм»: шаг фоновой сетки по умолчанию — 1 м, не
+    больше (иначе крупные треугольники фона заметны как артефакты при плоском
+    затенении в вебвьюере, Шаг 1.9)."""
+    values, grid = _make_planar_grid()
+    tin = build_site_tin(values, grid, CENTER_X, CENTER_Y, radius_m=20.0, features=[])
+
+    xs = np.unique(np.round(tin.vertices[:, 0], 6))
+    xs.sort()
+    steps = np.diff(xs)
+    assert steps.max() == pytest.approx(1.0, abs=1e-6)
+    assert steps.min() == pytest.approx(1.0, abs=1e-6)
+
+
+def test_sample_bilinear_grid_matches_scalar_sample_bilinear():
+    """Векторизованная выборка (используется для фоновой сетки — миллионы
+    точек, поточечный `sample_bilinear` был бы на порядки медленнее) должна
+    давать те же значения, что и поточечная эталонная функция."""
+    values, grid = _make_planar_grid()
+    world_x = np.array([CENTER_X, CENTER_X + 37.3, CENTER_X - 150.0, CENTER_X - 10_000.0])
+    world_y = np.array([CENTER_Y, CENTER_Y - 88.1, CENTER_Y + 150.0, CENTER_Y])
+
+    vectorized = sample_bilinear_grid(values, grid, world_x, world_y)
+
+    for i in range(len(world_x)):
+        scalar = sample_bilinear(values, grid, float(world_x[i]), float(world_y[i]))
+        if scalar is None:
+            assert np.isnan(vectorized[i])
+        else:
+            assert vectorized[i] == pytest.approx(scalar, abs=1e-9)
+
+
+def test_smooth_grid_elevations_preserves_plane_away_from_edges():
+    """Скользящее среднее линейной функции по симметричному окну равно её
+    значению в центре — сглаживание фона не должно искажать наклон рельефа,
+    только убирать локальный шум (докстринг `smooth_grid_elevations`)."""
+    xs, ys = np.meshgrid(np.arange(50.0), np.arange(50.0), indexing="ij")
+    plane = PLANE_A * xs + PLANE_B * ys + PLANE_C
+
+    smoothed = smooth_grid_elevations(plane, window_cells=7)
+
+    interior = smoothed[10:-10, 10:-10]
+    expected = plane[10:-10, 10:-10]
+    assert np.allclose(interior, expected, atol=1e-9)
+
+
+def test_multi_structural_smoothing_reduces_background_spike_but_keeps_flat_pads():
+    """«Многоструктурное сглаживание»: фон сглаживается 2D-скользящим средним
+    (одиночный всплеск растра размывается по соседям), а плоская площадка
+    здания остаётся ТОЧНОЙ — она не проходит через `smooth_grid_elevations`
+    вовсе (докстринг модуля `relief.tin`). Здание намеренно далеко от
+    всплеска — иначе всплеск попал бы в вырезанную зону здания и тест
+    проверял бы не то, что заявлено."""
+    half = 60.0
+    pixel = 1.0
+    size = int(2 * half / pixel)
+    cx, cy = 500.0, 500.0
+    transform = Affine(pixel, 0.0, cx - half, 0.0, -pixel, cy + half)
+    grid = Grid(transform=transform, width=size, height=size, crs="EPSG:3857")
+
+    values = np.full((size, size), 100.0)
+    spike_row, spike_col = size // 2 + 20, size // 2 + 20  # вдали от здания у центра
+    values[spike_row, spike_col] = 150.0
+
+    spike_local_x = transform.a * (spike_col + 0.5) + transform.c - cx
+    spike_local_y = transform.e * (spike_row + 0.5) + transform.f - cy
+
+    building = SiteFeature(
+        layer="osm_buildings", osm_id=1, osm_type="W",
+        geometry=Polygon([(-5, -5), (5, -5), (5, 5), (-5, 5)]),
+        attributes={}, confidence={},
+    )
+    tin = build_site_tin(values, grid, cx, cy, radius_m=50.0, features=[building])
+
+    vertices = tin.vertices
+    dist_to_spike = np.hypot(vertices[:, 0] - spike_local_x, vertices[:, 1] - spike_local_y)
+    nearest_idx = np.argmin(dist_to_spike)
+    assert dist_to_spike[nearest_idx] < 1.0  # фоновая сетка на шаге 1 м покрывает окрестность всплеска
+
+    spike_z = vertices[nearest_idx, 2]
+    assert 100.0 < spike_z < 150.0  # сглажено между фоном и сырым всплеском, не равно ни тому ни другому
+
+    far_mask = dist_to_spike > 10.0  # вне окна сглаживания (радиус 2 м по умолчанию)
+    assert np.allclose(vertices[far_mask, 2], 100.0, atol=1e-6)
+
+    building_corner_z = tin.interpolate_z(-5.0, -5.0)
+    assert building_corner_z == pytest.approx(100.0, abs=1e-9)  # площадка не сглажена — точная
