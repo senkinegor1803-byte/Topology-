@@ -35,6 +35,7 @@ from shapely.geometry import Point, box
 
 from topology_geo.geometry.bridges import BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid
+from topology_geo.geometry.landscaping import FENCE_POST_RADIUS_M, FenceSegment, StreetLamp
 from topology_geo.geometry.rail import (
     POLE_HEIGHT_M,
     POLE_RADIUS_M,
@@ -177,6 +178,8 @@ class SiteModel:
     power_wires: list[WireSpan] = field(default_factory=list)
     substations: list[Substation] = field(default_factory=list)
     power_safety_zones: list[PowerSafetyZone] = field(default_factory=list)
+    fences: list[FenceSegment] = field(default_factory=list)
+    streetlamps: list[StreetLamp] = field(default_factory=list)
     trees: list[TreePoint] = field(default_factory=list)
     lanes: list[LaneRibbon] = field(default_factory=list)
     intersections: list[IntersectionArea] = field(default_factory=list)
@@ -827,6 +830,58 @@ def build_site_ifc(
             # ожидает ContainedInStructure, которого у пространственных
             # элементов нет.
             spatial_children.append(product)
+
+    # Ограждения/стены (Шаг 2.8, п. 2) - `IfcWall` для сплошной стены,
+    # `IfcRailing` для лёгкого ограждения (`FENCE` - нативный предопределённый
+    # тип только в IFC4X3; в IFC4 `IfcRailingTypeEnum` такого значения не
+    # знает вовсе, эмпирически проверено через ifcopenshell, поэтому там
+    # `USERDEFINED`). Оба класса - обычные `IfcBuildingElement`, роднятся с
+    # сайтом через `spatial.assign_container`, как и остальные простые
+    # элементы (не `IfcSpatialElement`, в отличие от `IfcSpatialZone` выше).
+    for fence in (site_model.fences if road_network_filter is None else []):
+        base_z = min_elevation_over_polygon(fence.ribbon, _terrain_elevation)
+        mesh = extrude_polygon_mesh(fence.ribbon, base_z, base_z + fence.height_m)
+        if fence.kind == "wall":
+            product = _add_mesh_product(
+                f, body_context, "IfcWall", f"Стена {fence.osm_id}", "USERDEFINED",
+                mesh, {"Pset_Ограждение": {"Тип": "стена", "Высота_м": round(fence.height_m, 3)}},
+            )
+        else:
+            predefined_type = "FENCE" if is_ifc43 else "USERDEFINED"
+            product = _add_mesh_product(
+                f, body_context, "IfcRailing", f"Ограждение {fence.osm_id}", predefined_type,
+                mesh, {"Pset_Ограждение": {"Тип": "ограждение", "Высота_м": round(fence.height_m, 3)}},
+            )
+            # Столбы - несколько на один osm_id (как опоры ЛЭП/контактной
+            # сети), в реестр GlobalId не попадают.
+            for i, (px, py) in enumerate(fence.posts):
+                pz = _terrain_elevation(px, py) or 0.0
+                verts, faces = mesh_cylinder(FENCE_POST_RADIUS_M, fence.height_m, segments=6)
+                verts = [(x + px, y + py, zz + pz) for x, y, zz in verts]
+                post_product = _add_mesh_product(
+                    f, body_context, "IfcRailing", f"Столб ограждения {fence.osm_id}-{i}", predefined_type,
+                    (verts, faces), {"Pset_Ограждение": {"Тип": "столб ограждения"}},
+                )
+                products.append(post_product)
+        products.append(product)
+        registry.append(("osm_landscaping", fence.osm_id, product.GlobalId))
+
+    # Фонари (Шаг 2.8, п. 2) - столб + головка светильника, тот же
+    # `mesh_cylinder`, что у деревьев/опор.
+    for lamp in (site_model.streetlamps if road_network_filter is None else []):
+        z = _terrain_elevation(lamp.x, lamp.y) or 0.0
+        pole_verts, pole_faces = mesh_cylinder(lamp.pole_radius_m, lamp.pole_height_m, segments=6)
+        head_verts, head_faces = mesh_cylinder(lamp.head_radius_m, lamp.head_height_m, segments=6)
+        head_verts = [(x, y, zz + lamp.pole_height_m) for x, y, zz in head_verts]
+        mesh = _combine_meshes([(pole_verts, pole_faces), (head_verts, head_faces)])
+        verts, faces = mesh
+        verts = [(x + lamp.x, y + lamp.y, zz + z) for x, y, zz in verts]
+        product = _add_mesh_product(
+            f, body_context, "IfcBuildingElementProxy", f"Фонарь {lamp.osm_id}", "USERDEFINED",
+            (verts, faces), {"Pset_Фонарь": {"Высота_м": round(lamp.pole_height_m, 3)}},
+        )
+        products.append(product)
+        registry.append(("osm_landscaping", lamp.osm_id, product.GlobalId))
 
     for i, tree in enumerate(site_model.trees if road_network_filter is None else []):
         z = _terrain_elevation(tree.x, tree.y) or 0.0

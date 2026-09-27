@@ -14,6 +14,7 @@ from shapely.geometry import LineString, Polygon
 
 from topology_geo.geometry.bridges import STATUS_CALCULATED, STATUS_OFFICIAL, BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
+from topology_geo.geometry.landscaping import FenceSegment, StreetLamp
 from topology_geo.geometry.power import PoleTower, PowerSafetyZone, Substation, WireSpan
 from topology_geo.geometry.rail import CatenaryPole, LevelCrossing, PlatformArea, RailRibbon
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
@@ -400,6 +401,70 @@ def test_road_network_filter_excludes_power_infrastructure():
     assert f.by_type("IfcCableSegment") == []
     assert f.by_type("IfcSpatialZone") == []
     assert not any(layer == "osm_power" for layer, _, _ in registry)
+
+
+# --- Шаг 2.8: ограждения/стены, фонари --------------------------------------
+
+
+def _make_site_model_with_landscaping_extras() -> SiteModel:
+    model = _make_site_model()
+    wall = FenceSegment(
+        osm_id=50, kind="wall", ribbon=LineString([(0, 40), (10, 40)]).buffer(0.1, cap_style="flat"),
+        height_m=2.0, posts=(),
+    )
+    fence = FenceSegment(
+        osm_id=51, kind="fence", ribbon=LineString([(20, 40), (30, 40)]).buffer(0.025, cap_style="flat"),
+        height_m=1.5, posts=((20.0, 40.0), (25.0, 40.0), (30.0, 40.0)),
+    )
+    lamp = StreetLamp(osm_id=52, x=35.0, y=40.0, pole_height_m=6.0, pole_radius_m=0.08, head_radius_m=0.15, head_height_m=0.3)
+    return SiteModel(
+        tin=model.tin, buildings=model.buildings, roads=model.roads,
+        water_areas=model.water_areas, waterways=model.waterways, rail=model.rail,
+        fences=[wall, fence], streetlamps=[lamp],
+        trees=model.trees,
+    )
+
+
+def test_build_site_ifc_includes_landscaping_infrastructure():
+    f, registry = build_site_ifc("IFC4", _make_site_model_with_landscaping_extras(), BASE_POINT)
+    assert validate_model(f) == []
+
+    walls = f.by_type("IfcWall")
+    assert any((w.Name or "").startswith("Стена 50") for w in walls)
+    railings = f.by_type("IfcRailing")
+    assert any((r.Name or "").startswith("Ограждение 51") for r in railings)
+    assert any((r.Name or "").startswith("Столб ограждения 51") for r in railings)
+    proxy_names = [e.Name for e in f.by_type("IfcBuildingElementProxy")]
+    assert any((n or "").startswith("Фонарь 52") for n in proxy_names)
+
+    layers = {(layer, osm_id) for layer, osm_id, _ in registry if layer == "osm_landscaping"}
+    assert layers == {("osm_landscaping", 50), ("osm_landscaping", 51), ("osm_landscaping", 52)}
+
+
+def test_ifc4x3_fence_uses_native_fence_predefined_type():
+    f, _ = build_site_ifc("IFC4X3", _make_site_model_with_landscaping_extras(), BASE_POINT)
+    railing = next(r for r in f.by_type("IfcRailing") if (r.Name or "").startswith("Ограждение 51"))
+    assert railing.PredefinedType == "FENCE"
+
+
+def test_ifc4_fence_falls_back_to_userdefined_predefined_type():
+    """IFC4 `IfcRailingTypeEnum` не знает значения FENCE (эмпирически
+    проверено через ifcopenshell) - предопределённый тип падает на
+    USERDEFINED, а не изобретается несуществующее значение схемы."""
+    f, _ = build_site_ifc("IFC4", _make_site_model_with_landscaping_extras(), BASE_POINT)
+    railing = next(r for r in f.by_type("IfcRailing") if (r.Name or "").startswith("Ограждение 51"))
+    assert railing.PredefinedType == "USERDEFINED"
+
+
+def test_road_network_filter_excludes_landscaping_infrastructure():
+    f, registry = build_site_ifc(
+        "IFC4", _make_site_model_with_landscaping_extras(), BASE_POINT, road_network_filter=NETWORK_INTERNAL
+    )
+    assert f.by_type("IfcWall") == []
+    assert f.by_type("IfcRailing") == []
+    proxy_names = [e.Name for e in f.by_type("IfcBuildingElementProxy")]
+    assert not any((n or "").startswith("Фонарь") for n in proxy_names)
+    assert not any(layer == "osm_landscaping" for layer, _, _ in registry)
 
 
 def _psets_of(model, name_predicate) -> dict:

@@ -19,6 +19,7 @@ from affine import Affine
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.geometry.bridges import build_bridge_ribbons
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
+from topology_geo.geometry.landscaping import build_fences, build_streetlamps
 from topology_geo.geometry.power import (
     build_poles,
     build_power_safety_zones,
@@ -185,6 +186,12 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     (`build_substations`); охранная зона по классу напряжения
     (`build_power_safety_zones`). Подробности и упрощения — `docs/power.md`.
 
+    Ограждения/стены и фонари (Шаг 2.8, п. 2, `geometry.landscaping`) —
+    оставшиеся из действия «опоры, столбы, бордюры, ограждения, пролёты,
+    фонари» параметрические генераторы (опоры/столбы и бордюр — Шаги
+    2.6/2.7/2.3). Библиотека элементов (п. 1, каталог + PBR-текстуры Poly
+    Haven, п. 4) — `topology_geo.assets`, подробности `docs/asset-library.md`.
+
     Мосты (Шаг 2.5, п. 1-3, `geometry.bridges.build_bridge_ribbons`) строятся
     ПОСЛЕ `roads`/`rail` — габарит проверяется по их осям (`RoadRibbon.axis`/
     `RailRibbon.axis`)."""
@@ -226,6 +233,11 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     substations = build_substations(dataset.features, tin.interpolate_z)
     power_safety_zones = build_power_safety_zones(dataset.features)
 
+    # Ограждения/стены и фонари (Шаг 2.8, п. 2) - опоры/столбы (рельс/ЛЭП) и
+    # бордюр уже параметрические с более ранних шагов.
+    fences = build_fences(dataset.features)
+    streetlamps = build_streetlamps(dataset.features)
+
     # Мосты, путепроводы (Шаг 2.5, п. 1-3) - габарит проверяется по осям уже
     # построенных немостовых дорог/путей (`RoadRibbon.axis`/`RailRibbon.axis`,
     # Шаг 2.4/2.5); дорога-мост сама не входит в `roads` (`is_bridge` в
@@ -252,6 +264,7 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         platforms=platforms, level_crossings=level_crossings, catenary_poles=catenary_poles,
         power_poles=power_poles, power_wires=power_wires, substations=substations,
         power_safety_zones=power_safety_zones,
+        fences=fences, streetlamps=streetlamps,
         trees=trees,
         lanes=street_network.lanes, intersections=street_network.intersections, markings=street_network.markings,
     )
@@ -315,6 +328,8 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         "power_wires": len(power_wires),
         "substations": len(substations),
         "power_safety_zones": len(power_safety_zones),
+        "fences": len(fences),
+        "streetlamps": len(streetlamps),
         "trees": len(trees),
         "lanes": len(street_network.lanes),
         "intersections": len(street_network.intersections),
