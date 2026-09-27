@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 from scipy.spatial import Delaunay
@@ -12,6 +14,7 @@ from shapely.geometry import LineString, Polygon
 
 from topology_geo.geometry.bridges import STATUS_CALCULATED, STATUS_OFFICIAL, BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
+from topology_geo.geometry.power import PoleTower, PowerSafetyZone, Substation, WireSpan
 from topology_geo.geometry.rail import CatenaryPole, LevelCrossing, PlatformArea, RailRibbon
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import RoadRibbon
@@ -30,6 +33,7 @@ from topology_geo.ifc.assemble import (
     lane_marking_elevation_fn,
     lane_pavement_elevation_fn,
     mesh_cylinder,
+    mesh_ribbon_along_path,
     pavement_elevation_fn,
     triangulate_polygon,
 )
@@ -134,6 +138,50 @@ def test_mesh_cylinder_has_expected_vertex_and_face_counts():
     verts, faces = mesh_cylinder(0.3, 6.0, segments=6)
     assert len(verts) == 12
     assert all(len(f) == 3 for f in faces)
+
+
+def test_mesh_cylinder_default_radius_top_matches_base_unchanged():
+    """Поведение по умолчанию (Шаг 2.6/ранее) не меняется - `radius_top=None`
+    даёт цилиндр постоянного сечения."""
+    verts, _ = mesh_cylinder(0.3, 6.0, segments=6)
+    base_ring, top_ring = verts[:6], verts[6:]
+    assert all(math.hypot(x, y) == pytest.approx(0.3) for x, y, _ in base_ring)
+    assert all(math.hypot(x, y) == pytest.approx(0.3) for x, y, _ in top_ring)
+
+
+def test_mesh_cylinder_tapers_to_radius_top():
+    """Решётчатая опора ЛЭП (Шаг 2.7, п. 1) - сужается к вершине."""
+    verts, _ = mesh_cylinder(1.5, 20.0, radius_top=0.3, segments=8)
+    base_ring, top_ring = verts[:8], verts[8:]
+    assert all(math.hypot(x, y) == pytest.approx(1.5) for x, y, _ in base_ring)
+    assert all(math.hypot(x, y) == pytest.approx(0.3) for x, y, _ in top_ring)
+    assert all(z == pytest.approx(0.0) for _, _, z in base_ring)
+    assert all(z == pytest.approx(20.0) for _, _, z in top_ring)
+
+
+def test_mesh_ribbon_along_path_area_matches_length_times_width_when_flat():
+    """Провод-упрощение (Шаг 2.7, п. 3): для прямого горизонтального пути
+    (без провиса) лента вырождается в тот же прямоугольник, что и
+    `line.buffer(width/2, cap_style="flat")` у дорог/рельсов."""
+    length, width = 40.0, 0.05
+    path = [(x, 0.0, 100.0) for x in (0.0, 10.0, 20.0, 30.0, 40.0)]
+    verts, faces = mesh_ribbon_along_path(path, width)
+    total_area = sum(_triangle_area_3d(verts[a], verts[b], verts[c]) for a, b, c in faces)
+    assert total_area == pytest.approx(length * width, rel=1e-9)
+
+
+def test_mesh_ribbon_along_path_follows_sag_in_z():
+    path = [(0.0, 0.0, 100.0), (5.0, 0.0, 97.0), (10.0, 0.0, 100.0)]
+    verts, _ = mesh_ribbon_along_path(path, 0.1)
+    n = len(path)
+    # средняя точка ленты (левый и правый край) должна унаследовать провис
+    assert verts[1][2] == pytest.approx(97.0)
+    assert verts[n + 1][2] == pytest.approx(97.0)
+
+
+def test_mesh_ribbon_along_path_rejects_single_point():
+    with pytest.raises(ValueError):
+        mesh_ribbon_along_path([(0.0, 0.0, 0.0)], 0.1)
 
 
 # --- build_site_ifc -----------------------------------------------------------
@@ -241,6 +289,117 @@ def test_road_network_filter_excludes_rail_extras():
     layers = {layer for layer, _, _ in registry}
     assert "osm_railway_platforms" not in layers
     assert "osm_railway_crossings" not in layers
+
+
+# --- Шаг 2.7: опоры/провода ЛЭП, подстанции, охранная зона ------------------
+
+
+def _make_site_model_with_power_extras() -> SiteModel:
+    model = _make_site_model()
+    pole_real = PoleTower(
+        osm_id=40, x=20.0, y=30.0, height_m=9.0, height_confidence="факт",
+        radius_base_m=0.15, radius_top_m=0.15, material="concrete", series=None,
+        voltage_kv=10.0, source="факт",
+    )
+    pole_calculated = PoleTower(
+        osm_id=None, x=20.0, y=45.0, height_m=9.0, height_confidence="умолчание",
+        radius_base_m=0.12, radius_top_m=0.12, material="wood", series=None,
+        voltage_kv=10.0, source="умолчание",
+    )
+    wire = WireSpan(
+        line_osm_id=41, strand_index=0, cables=3, voltage_kv=10.0,
+        path=[(20.0, 30.0, 110.0), (20.0, 37.5, 108.0), (20.0, 45.0, 110.0)],
+    )
+    substation = Substation(
+        osm_id=42, footprint=Polygon([(30, -40), (38, -40), (38, -34), (30, -34)]),
+        base_z=100.0, height_m=4.0, kind="substation",
+    )
+    zone = PowerSafetyZone(
+        line_osm_id=41, corridor=LineString([(0, -45), (0, -35)]).buffer(10.0, cap_style="flat"),
+        voltage_kv=20.0, half_width_m=10.0,
+    )
+    return SiteModel(
+        tin=model.tin, buildings=model.buildings, roads=model.roads,
+        water_areas=model.water_areas, waterways=model.waterways, rail=model.rail,
+        power_poles=[pole_real, pole_calculated], power_wires=[wire],
+        substations=[substation], power_safety_zones=[zone],
+        trees=model.trees,
+    )
+
+
+def test_build_site_ifc_includes_power_infrastructure():
+    f, registry = build_site_ifc("IFC4", _make_site_model_with_power_extras(), BASE_POINT)
+    assert validate_model(f) == []
+
+    proxy_names = [e.Name for e in f.by_type("IfcBuildingElementProxy")]
+    assert any((n or "").startswith("Опора ЛЭП 40") for n in proxy_names)
+    assert any((n or "").startswith("Опора ЛЭП (расч.)") for n in proxy_names)
+    assert any((n or "").startswith("Подстанция") for n in proxy_names)
+    assert any(e.PredefinedType == "CABLESEGMENT" for e in f.by_type("IfcCableSegment"))
+    assert f.by_type("IfcSpatialZone")
+
+    layers = {layer for layer, osm_id, _ in registry if layer == "osm_power"}
+    assert layers == {"osm_power"}
+    power_osm_ids = {osm_id for layer, osm_id, _ in registry if layer == "osm_power"}
+    assert power_osm_ids == {40, 42}  # расчётная опора (osm_id=None) не регистрируется
+
+
+def test_power_pole_pset_reports_material_voltage_and_source():
+    f, _ = build_site_ifc("IFC4", _make_site_model_with_power_extras(), BASE_POINT)
+    pset = _psets_of_proxy_by_name(f, "Опора ЛЭП 40")["Pset_ЛЭП"]
+    assert pset["Материал"] == "concrete"
+    assert pset["Источник"] == "факт"
+    assert pset["Напряжение_кВ"] == pytest.approx(10.0)
+    assert "Серия" not in pset  # не подставляется, когда design/structure отсутствуют
+
+
+def test_power_wire_pset_reports_phases_and_circuits():
+    f, _ = build_site_ifc("IFC4", _make_site_model_with_power_extras(), BASE_POINT)
+    wire = next(e for e in f.by_type("IfcCableSegment") if e.PredefinedType == "CABLESEGMENT")
+    pset = {
+        rel.RelatingPropertyDefinition.Name: {
+            prop.Name: prop.NominalValue.wrappedValue for prop in rel.RelatingPropertyDefinition.HasProperties
+        }
+        for rel in wire.IsDefinedBy
+        if rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
+    }["Pset_ЛЭП"]
+    assert pset["Число_фаз"] == 3
+    assert pset["Число_цепей"] == 1
+    assert pset["Напряжение_кВ"] == pytest.approx(10.0)
+
+
+def test_substation_pset_reports_kind():
+    f, _ = build_site_ifc("IFC4", _make_site_model_with_power_extras(), BASE_POINT)
+    pset = _psets_of_proxy_by_name(f, "Подстанция 42")["Pset_Подстанция"]
+    assert pset["Тип"] == "substation"
+
+
+def test_safety_zone_reports_voltage_class_and_status():
+    f, _ = build_site_ifc("IFC4", _make_site_model_with_power_extras(), BASE_POINT)
+    zone = f.by_type("IfcSpatialZone")[0]
+    pset = {
+        rel.RelatingPropertyDefinition.Name: {
+            prop.Name: prop.NominalValue.wrappedValue for prop in rel.RelatingPropertyDefinition.HasProperties
+        }
+        for rel in zone.IsDefinedBy
+        if rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
+    }["Pset_Ограничение"]
+    assert pset["Вид"] == "охранная зона ЛЭП"
+    assert pset["Статус"] == "расчётная"
+    assert pset["Напряжение_кВ"] == pytest.approx(20.0)
+    assert pset["Полуширина_м"] == pytest.approx(10.0)
+
+
+def test_road_network_filter_excludes_power_infrastructure():
+    f, registry = build_site_ifc(
+        "IFC4", _make_site_model_with_power_extras(), BASE_POINT, road_network_filter=NETWORK_INTERNAL
+    )
+    proxy_names = [e.Name for e in f.by_type("IfcBuildingElementProxy")]
+    assert not any((n or "").startswith("Опора ЛЭП") for n in proxy_names)
+    assert not any((n or "").startswith("Подстанция") for n in proxy_names)
+    assert f.by_type("IfcCableSegment") == []
+    assert f.by_type("IfcSpatialZone") == []
+    assert not any(layer == "osm_power" for layer, _, _ in registry)
 
 
 def _psets_of(model, name_predicate) -> dict:

@@ -43,6 +43,15 @@ from topology_geo.geometry.rail import (
     PlatformArea,
     RailRibbon,
 )
+from topology_geo.geometry.power import (
+    SAFETY_ZONE_HEIGHT_M,
+    WIRE_RIBBON_WIDTH_M,
+    PoleTower,
+    PowerSafetyZone,
+    Substation,
+    WireSpan,
+    min_elevation_over_polygon,
+)
 from topology_geo.geometry.road_network import NETWORK_INTERNAL
 from topology_geo.geometry.roads import RoadRibbon
 from topology_geo.geometry.roofs import (
@@ -164,6 +173,10 @@ class SiteModel:
     platforms: list[PlatformArea] = field(default_factory=list)
     level_crossings: list[LevelCrossing] = field(default_factory=list)
     catenary_poles: list[CatenaryPole] = field(default_factory=list)
+    power_poles: list[PoleTower] = field(default_factory=list)
+    power_wires: list[WireSpan] = field(default_factory=list)
+    substations: list[Substation] = field(default_factory=list)
+    power_safety_zones: list[PowerSafetyZone] = field(default_factory=list)
     trees: list[TreePoint] = field(default_factory=list)
     lanes: list[LaneRibbon] = field(default_factory=list)
     intersections: list[IntersectionArea] = field(default_factory=list)
@@ -266,16 +279,22 @@ def extrude_polygon_mesh(polygon, base_z: float, top_z: float) -> tuple[list[Ver
     return vertices, faces
 
 
-def mesh_cylinder(radius: float, length: float, segments: int = 8) -> tuple[list[Vertex], list[Face]]:
-    """Упрощённый ствол дерева — переиспользует ту же форму, что тестовый
-    генератор Шага 0.2 (`ifc.generate_test_ifc.mesh_cylinder`)."""
+def mesh_cylinder(
+    radius: float, length: float, radius_top: float | None = None, segments: int = 8
+) -> tuple[list[Vertex], list[Face]]:
+    """Упрощённый ствол дерева/опоры — переиспользует ту же форму, что
+    тестовый генератор Шага 0.2 (`ifc.generate_test_ifc.mesh_cylinder`).
+    `radius_top` (Шаг 2.7, п. 1) сужает верх относительно `radius` —
+    решётчатая опора ЛЭП; при `None` — цилиндр постоянного сечения, как
+    раньше (поведение по умолчанию не меняется)."""
+    top_radius = radius if radius_top is None else radius_top
     verts: list[Vertex] = []
     for i in range(segments):
         angle = 2 * math.pi * i / segments
         verts.append((radius * math.cos(angle), radius * math.sin(angle), 0.0))
     for i in range(segments):
         angle = 2 * math.pi * i / segments
-        verts.append((radius * math.cos(angle), radius * math.sin(angle), length))
+        verts.append((top_radius * math.cos(angle), top_radius * math.sin(angle), length))
 
     faces: list[Face] = []
     for i in range(segments):
@@ -288,6 +307,43 @@ def mesh_cylinder(radius: float, length: float, segments: int = 8) -> tuple[list
     for i in range(1, segments - 1):
         faces.append((base, base + i, base + i + 1))
     return verts, faces
+
+
+def mesh_ribbon_along_path(points: list[Vertex], width: float) -> tuple[list[Vertex], list[Face]]:
+    """Тонкая лента вдоль ломаной в 3D (Шаг 2.7, п. 3 — сэмплированная
+    цепная линия провода): не круглая труба, а плоская полоса шириной
+    `width`, «стоящая на ребре» вдоль пути — смещение только по
+    горизонтальному перпендикуляру к локальному направлению (вертикальная
+    составляющая пути, то есть сам провис, в ширину не проецируется). Тот же
+    приём, что и у плоских лент дороги/воды/балласта
+    (`line.buffer(width/2)`), только с сохранением индивидуальной отметки
+    каждой точки пути вместо одной общей плоскости — упрощённое визуальное
+    приближение тонкого провода, не солид его реального круглого сечения."""
+    n = len(points)
+    if n < 2:
+        raise ValueError("mesh_ribbon_along_path требует минимум 2 точки")
+    half = width / 2
+    left: list[Vertex] = []
+    right: list[Vertex] = []
+    for i, (px, py, pz) in enumerate(points):
+        if i == 0:
+            dx, dy = points[1][0] - points[0][0], points[1][1] - points[0][1]
+        elif i == n - 1:
+            dx, dy = points[-1][0] - points[-2][0], points[-1][1] - points[-2][1]
+        else:
+            dx, dy = points[i + 1][0] - points[i - 1][0], points[i + 1][1] - points[i - 1][1]
+        norm = math.hypot(dx, dy)
+        nx, ny = (-dy / norm, dx / norm) if norm > 0 else (1.0, 0.0)
+        left.append((px + nx * half, py + ny * half, pz))
+        right.append((px - nx * half, py - ny * half, pz))
+
+    vertices = left + right
+    faces: list[Face] = []
+    for i in range(n - 1):
+        l0, l1, r0, r1 = i, i + 1, n + i, n + i + 1
+        faces.append((l0, l1, r1))
+        faces.append((l0, r1, r0))
+    return vertices, faces
 
 
 def _add_mesh_product(
@@ -693,6 +749,84 @@ def build_site_ifc(
             },
         )
         products.append(product)
+
+    # Опоры/башни ЛЭП (Шаг 2.7, п. 1-2) - решётчатая башня сужается к
+    # вершине (radius_top < radius_base), простой столб - постоянного
+    # сечения (radius_top is None у mesh_cylinder).
+    for pole in (site_model.power_poles if road_network_filter is None else []):
+        z = _terrain_elevation(pole.x, pole.y) or 0.0
+        verts, faces = mesh_cylinder(pole.radius_base_m, pole.height_m, radius_top=pole.radius_top_m, segments=8)
+        verts = [(x + pole.x, y + pole.y, zz + z) for x, y, zz in verts]
+        pole_pset = {"Материал": pole.material, "Источник": pole.source}
+        if pole.voltage_kv is not None:
+            pole_pset["Напряжение_кВ"] = round(pole.voltage_kv, 3)
+        if pole.series is not None:
+            pole_pset["Серия"] = pole.series
+        name = f"Опора ЛЭП {pole.osm_id}" if pole.osm_id is not None else f"Опора ЛЭП (расч.) {pole.x:.1f}/{pole.y:.1f}"
+        product = _add_mesh_product(
+            f, body_context, "IfcBuildingElementProxy", name, "USERDEFINED",
+            (verts, faces), {"Pset_ЛЭП": pole_pset},
+        )
+        products.append(product)
+        if pole.osm_id is not None:
+            registry.append(("osm_power", pole.osm_id, product.GlobalId))
+
+    # Провода (Шаг 2.7, п. 3) - `IfcCableSegment`/`CABLESEGMENT`, нативно в
+    # обеих схемах (в отличие от IfcRoad/IfcBridge, здесь без прокси-
+    # ветвления по схеме не требуется; НЕ `IfcFlowSegment` — та в IFC4/
+    # IFC4X3 не имеет собственного `PredefinedType` вовсе, только у
+    # конкретных подтипов вроде `IfcCableSegment`, проверено эмпирически
+    # через ifcopenshell, не по памяти). Несколько проводов (по числу
+    # цепей/фаз) и несколько пролётов делят один `line_osm_id` - как и опоры
+    # контактной сети/штрихи разметки, в реестр GlobalId не попадают.
+    for wire in (site_model.power_wires if road_network_filter is None else []):
+        verts, faces = mesh_ribbon_along_path(wire.path, WIRE_RIBBON_WIDTH_M)
+        wire_pset = {"Число_фаз": 3, "Число_цепей": max(1, wire.cables // 3)}
+        if wire.voltage_kv is not None:
+            wire_pset["Напряжение_кВ"] = round(wire.voltage_kv, 3)
+        product = _add_mesh_product(
+            f, body_context, "IfcCableSegment", f"Провод {wire.line_osm_id}-{wire.strand_index}", "CABLESEGMENT",
+            (verts, faces), {"Pset_ЛЭП": wire_pset},
+        )
+        products.append(product)
+
+    # Подстанции/ТП упрощённым объёмом (Шаг 2.7, п. 4).
+    for substation in (site_model.substations if road_network_filter is None else []):
+        polys = substation.footprint.geoms if substation.footprint.geom_type.startswith("Multi") else [substation.footprint]
+        for poly in polys:
+            mesh = extrude_polygon_mesh(poly, substation.base_z, substation.base_z + substation.height_m)
+            product = _add_mesh_product(
+                f, body_context, "IfcBuildingElementProxy", f"Подстанция {substation.osm_id}", "USERDEFINED",
+                mesh, {"Pset_Подстанция": {"Тип": substation.kind}},
+            )
+            products.append(product)
+            registry.append(("osm_power", substation.osm_id, product.GlobalId))
+
+    # Охранная зона по классу напряжения (Шаг 2.7, п. 5) - представительный
+    # объём (`SAFETY_ZONE_HEIGHT_M`), не по фактическим опорам конкретной
+    # линии; `Статус="расчётная"` - honestly не сверено с официальным
+    # реестром (Шаг 3.1 этим проходом не реализован).
+    for zone in (site_model.power_safety_zones if road_network_filter is None else []):
+        polys = zone.corridor.geoms if zone.corridor.geom_type.startswith("Multi") else [zone.corridor]
+        for poly in polys:
+            base_z = min_elevation_over_polygon(poly, _terrain_elevation)
+            mesh = extrude_polygon_mesh(poly, base_z, base_z + SAFETY_ZONE_HEIGHT_M)
+            product = _add_mesh_product(
+                f, body_context, "IfcSpatialZone", f"Охранная зона ЛЭП {zone.line_osm_id}", "USERDEFINED",
+                mesh,
+                {
+                    "Pset_Ограничение": {
+                        "Вид": "охранная зона ЛЭП", "Статус": "расчётная",
+                        "Напряжение_кВ": round(zone.voltage_kv, 3), "Полуширина_м": round(zone.half_width_m, 3),
+                    }
+                },
+            )
+            # IfcSpatialZone — IfcSpatialElement, а не обычный IfcElement:
+            # роднится с сайтом через aggregate.assign_object (как
+            # IfcRoad/IfcBridge выше), не spatial.assign_container — тот
+            # ожидает ContainedInStructure, которого у пространственных
+            # элементов нет.
+            spatial_children.append(product)
 
     for i, tree in enumerate(site_model.trees if road_network_filter is None else []):
         z = _terrain_elevation(tree.x, tree.y) or 0.0

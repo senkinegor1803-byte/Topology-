@@ -19,6 +19,13 @@ from affine import Affine
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.geometry.bridges import build_bridge_ribbons
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
+from topology_geo.geometry.power import (
+    build_poles,
+    build_power_safety_zones,
+    build_substations,
+    build_wire_spans,
+    place_calculated_poles,
+)
 from topology_geo.geometry.rail import (
     build_level_crossings,
     build_platform_areas,
@@ -171,6 +178,13 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     (`place_catenary_poles`). Шпалы/рельсы индивидуальной геометрией в
     ближнем кольце в этом проходе не строятся, см. `docs/rail.md`.
 
+    Электросети (Шаг 2.7, `geometry.power`): опоры/башни по точкам OSM
+    (`build_poles`) + расчётная расстановка для линий без реальных опор
+    (`place_calculated_poles`); провода — цепная линия между опорами
+    (`build_wire_spans`); подстанции/ТП — упрощённый объём
+    (`build_substations`); охранная зона по классу напряжения
+    (`build_power_safety_zones`). Подробности и упрощения — `docs/power.md`.
+
     Мосты (Шаг 2.5, п. 1-3, `geometry.bridges.build_bridge_ribbons`) строятся
     ПОСЛЕ `roads`/`rail` — габарит проверяется по их осям (`RoadRibbon.axis`/
     `RailRibbon.axis`)."""
@@ -200,6 +214,18 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     catenary_poles = place_catenary_poles(dataset.features)
     trees = build_individual_trees(dataset.features) + scatter_forest_trees(dataset.features)
 
+    # Электросети с опорами (Шаг 2.7) - реальные опоры/башни по точкам OSM,
+    # расчётная расстановка только для линий без единой реальной опоры
+    # (`place_calculated_poles`, п. 2); провода строятся по ОБЪЕДИНЁННОМУ
+    # списку реальных+расчётных опор (`build_wire_spans` сам находит, какие
+    # из них лежат на конкретной линии, по расстоянию до её оси).
+    power_real_poles = build_poles(dataset.features)
+    power_calculated_poles = place_calculated_poles(dataset.features, power_real_poles)
+    power_poles = power_real_poles + power_calculated_poles
+    power_wires = build_wire_spans(dataset.features, power_poles, tin.interpolate_z)
+    substations = build_substations(dataset.features, tin.interpolate_z)
+    power_safety_zones = build_power_safety_zones(dataset.features)
+
     # Мосты, путепроводы (Шаг 2.5, п. 1-3) - габарит проверяется по осям уже
     # построенных немостовых дорог/путей (`RoadRibbon.axis`/`RailRibbon.axis`,
     # Шаг 2.4/2.5); дорога-мост сама не входит в `roads` (`is_bridge` в
@@ -224,6 +250,8 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         tin=tin, buildings=buildings, roads=roads, bridges=bridges,
         water_areas=water_areas, waterways=waterways, rail=rail,
         platforms=platforms, level_crossings=level_crossings, catenary_poles=catenary_poles,
+        power_poles=power_poles, power_wires=power_wires, substations=substations,
+        power_safety_zones=power_safety_zones,
         trees=trees,
         lanes=street_network.lanes, intersections=street_network.intersections, markings=street_network.markings,
     )
@@ -283,6 +311,10 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         "platforms": len(platforms),
         "level_crossings": len(level_crossings),
         "catenary_poles": len(catenary_poles),
+        "power_poles": len(power_poles),
+        "power_wires": len(power_wires),
+        "substations": len(substations),
+        "power_safety_zones": len(power_safety_zones),
         "trees": len(trees),
         "lanes": len(street_network.lanes),
         "intersections": len(street_network.intersections),
