@@ -21,9 +21,14 @@ from topology_geo.geometry.roads import (
     rebuild_road_ribbon,
 )
 from topology_geo.geometry.vegetation import (
+    DEFAULT_FOREST_DENSITY_PER_HA,
+    DEFAULT_TREE_HEIGHT_M,
     DEFAULT_TREE_SPECIES,
+    SHRUB_HEIGHT_M,
     build_individual_trees,
+    build_lawns,
     scatter_forest_trees,
+    scatter_shrubs,
 )
 from topology_geo.geometry.water import build_water_areas, build_waterway_ribbons
 from topology_geo.selection.service import SiteFeature
@@ -318,3 +323,94 @@ def test_scatter_forest_trees_skips_tiny_polygons():
     tiny = _feature("osm_vegetation", Polygon([(0, 0), (0.1, 0), (0.1, 0.1), (0, 0.1)]))
     trees = scatter_forest_trees([tiny], density_per_ha=400.0, seed=1)
     assert trees == []
+
+
+# --- Шаг 2.9: высота дерева, плотность по типу леса, газоны, кустарники -----
+
+
+def test_individual_tree_uses_height_tag_when_present():
+    feature = _feature("osm_vegetation", Point(5, 5), raw_tags={"natural": "tree", "height": "15.5"})
+    tree = build_individual_trees([feature])[0]
+    assert tree.height_m == pytest.approx(15.5)
+    assert tree.height_confidence == CONFIDENCE_FACT
+
+
+def test_individual_tree_defaults_height_when_tag_missing():
+    feature = _feature("osm_vegetation", Point(5, 5))
+    tree = build_individual_trees([feature])[0]
+    assert tree.height_m == pytest.approx(DEFAULT_TREE_HEIGHT_M)
+    assert tree.height_confidence == CONFIDENCE_DEFAULT
+
+
+@pytest.mark.parametrize("bad_height", ["0", "-5", "abc", ""])
+def test_individual_tree_tolerates_bad_height_tag(bad_height):
+    feature = _feature("osm_vegetation", Point(5, 5), raw_tags={"height": bad_height})
+    tree = build_individual_trees([feature])[0]
+    assert tree.height_m == pytest.approx(DEFAULT_TREE_HEIGHT_M)
+    assert tree.height_confidence == CONFIDENCE_DEFAULT
+
+
+def test_scatter_forest_trees_uses_density_by_leaf_type():
+    needleleaved = _feature(
+        "osm_vegetation", Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]),
+        raw_tags={"natural": "wood", "leaf_type": "needleleaved"}, osm_id=1,
+    )
+    broadleaved = _feature(
+        "osm_vegetation", Polygon([(200, 0), (300, 0), (300, 100), (200, 100)]),
+        raw_tags={"natural": "wood", "leaf_type": "broadleaved"}, osm_id=2,
+    )
+    needle_trees = scatter_forest_trees([needleleaved], seed=1)
+    broad_trees = scatter_forest_trees([broadleaved], seed=1)
+    assert len(needle_trees) == pytest.approx(500, abs=5)
+    assert len(broad_trees) == pytest.approx(350, abs=5)
+    assert len(needle_trees) > len(broad_trees)
+
+
+def test_scatter_forest_trees_no_leaf_type_uses_default_density():
+    forest = _feature("osm_vegetation", Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]), raw_tags={"natural": "wood"})
+    trees = scatter_forest_trees([forest], seed=1)
+    assert len(trees) == pytest.approx(DEFAULT_FOREST_DENSITY_PER_HA, abs=5)
+
+
+def test_scatter_forest_trees_excludes_grass_landuse():
+    """Газон - не лес; деревья на нём не рассеиваются с Шага 2.9 (раньше
+    landuse=grass ошибочно получал ту же плотность, что и настоящий лес)."""
+    grass = _feature("osm_vegetation", Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]), raw_tags={"landuse": "grass"})
+    assert scatter_forest_trees([grass], seed=1) == []
+
+
+def test_scatter_forest_trees_excludes_scrub():
+    scrub = _feature("osm_vegetation", Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]), raw_tags={"natural": "scrub"})
+    assert scatter_forest_trees([scrub], seed=1) == []
+
+
+def test_build_lawns_returns_grass_polygons():
+    grass = _feature(
+        "osm_vegetation", Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), osm_id=9, raw_tags={"landuse": "grass"}
+    )
+    lawns = build_lawns([grass])
+    assert len(lawns) == 1
+    assert lawns[0].osm_id == 9
+    assert lawns[0].polygon.area == pytest.approx(100.0)
+
+
+def test_build_lawns_ignores_forest_and_points():
+    forest = _feature("osm_vegetation", Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), raw_tags={"natural": "wood"})
+    point = _feature("osm_vegetation", Point(0, 0), raw_tags={"landuse": "grass"})
+    assert build_lawns([forest, point]) == []
+
+
+def test_scatter_shrubs_matches_density_and_stays_inside_polygon():
+    scrub = _feature("osm_vegetation", Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]), raw_tags={"natural": "scrub"})
+    shrubs = scatter_shrubs([scrub], density_per_ha=1500.0, seed=3)
+    assert len(shrubs) == 1500
+    poly = scrub.geometry
+    assert all(poly.contains(Point(s.x, s.y)) for s in shrubs)
+    assert all(s.height_m == pytest.approx(SHRUB_HEIGHT_M) for s in shrubs)
+    assert all(s.height_m < DEFAULT_TREE_HEIGHT_M for s in shrubs)
+
+
+def test_scatter_shrubs_ignores_wood_and_grass():
+    wood = _feature("osm_vegetation", Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), raw_tags={"natural": "wood"})
+    grass = _feature("osm_vegetation", Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), raw_tags={"landuse": "grass"})
+    assert scatter_shrubs([wood, grass], seed=1) == []

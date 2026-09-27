@@ -222,6 +222,23 @@ def test_vegetation_no_species_or_genus_defaults_to_none():
     assert result["species"].confidence == CONFIDENCE_DEFAULT
 
 
+def test_vegetation_falls_back_to_leaf_type_when_no_species_or_genus():
+    result = normalize_vegetation({"natural": "wood", "leaf_type": "needleleaved"})
+    assert result["species"].value == "хвойное"
+    assert result["species"].confidence == CONFIDENCE_FACT
+
+
+def test_vegetation_species_takes_priority_over_leaf_type():
+    result = normalize_vegetation({"species": "Picea abies", "leaf_type": "broadleaved"})
+    assert result["species"].value == "Picea abies"
+
+
+def test_vegetation_unknown_leaf_type_value_defaults_to_none():
+    result = normalize_vegetation({"leaf_type": "unknown_value"})
+    assert result["species"].value is None
+    assert result["species"].confidence == CONFIDENCE_DEFAULT
+
+
 # --- Общее ---------------------------------------------------------------
 
 

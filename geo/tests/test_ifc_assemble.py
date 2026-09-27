@@ -14,13 +14,13 @@ from shapely.geometry import LineString, Polygon
 
 from topology_geo.geometry.bridges import STATUS_CALCULATED, STATUS_OFFICIAL, BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid, EntranceInfo, LAYER_BUILDING_PARTS
-from topology_geo.geometry.landscaping import FenceSegment, StreetLamp
+from topology_geo.geometry.landscaping import Bench, FenceSegment, StreetLamp
 from topology_geo.geometry.power import PoleTower, PowerSafetyZone, Substation, WireSpan
 from topology_geo.geometry.rail import CatenaryPole, LevelCrossing, PlatformArea, RailRibbon
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import RoadRibbon
 from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRibbon
-from topology_geo.geometry.vegetation import TreePoint
+from topology_geo.geometry.vegetation import LawnArea, ShrubPoint, TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.ifc.assemble import (
     LANE_CROSS_SLOPE,
@@ -464,6 +464,82 @@ def test_road_network_filter_excludes_landscaping_infrastructure():
     assert f.by_type("IfcRailing") == []
     proxy_names = [e.Name for e in f.by_type("IfcBuildingElementProxy")]
     assert not any((n or "").startswith("Фонарь") for n in proxy_names)
+    assert not any(layer == "osm_landscaping" for layer, _, _ in registry)
+
+
+# --- Шаг 2.9: высота дерева, кустарники, газоны, скамейки -------------------
+
+
+def _make_site_model_with_vegetation_extras() -> SiteModel:
+    model = _make_site_model()
+    tall_tree = TreePoint(
+        x=25.0, y=-30.0, species="Quercus robur", confidence="факт", source_osm_id=60,
+        height_m=18.0, height_confidence="факт",
+    )
+    shrub = ShrubPoint(x=30.0, y=-30.0, height_m=1.2, source_osm_id=61)
+    lawn = LawnArea(osm_id=62, polygon=Polygon([(0, -40), (10, -40), (10, -35), (0, -35)]))
+    bench = Bench(osm_id=63, x=15.0, y=-40.0, length_m=1.5, depth_m=0.5, seat_height_m=0.45)
+    return SiteModel(
+        tin=model.tin, buildings=model.buildings, roads=model.roads,
+        water_areas=model.water_areas, waterways=model.waterways, rail=model.rail,
+        trees=[tall_tree], shrubs=[shrub], lawns=[lawn], benches=[bench],
+    )
+
+
+def test_build_site_ifc_includes_vegetation_extras():
+    f, registry = build_site_ifc("IFC4", _make_site_model_with_vegetation_extras(), BASE_POINT)
+    assert validate_model(f) == []
+
+    geo_names = [e.Name for e in f.by_type("IfcGeographicElement")]
+    assert any((n or "").startswith("Дерево 60") for n in geo_names)
+    assert any((n or "").startswith("Куст 61") for n in geo_names)
+    assert any((n or "").startswith("Газон 62") for n in geo_names)
+    assert any((item.Name or "").startswith("Скамейка 63") for item in f.by_type("IfcFurniture"))
+
+    layers = {(layer, osm_id) for layer, osm_id, _ in registry}
+    assert ("osm_vegetation", 60) in layers
+    assert ("osm_vegetation", 61) in layers  # куст - тоже регистрируется, как рассеянные деревья леса
+    assert ("osm_vegetation", 62) in layers
+    assert ("osm_landscaping", 63) in layers
+
+
+def test_tree_pset_reports_height_from_tag():
+    f, _ = build_site_ifc("IFC4", _make_site_model_with_vegetation_extras(), BASE_POINT)
+    element = next(e for e in f.by_type("IfcGeographicElement") if (e.Name or "").startswith("Дерево 60"))
+    pset = {
+        rel.RelatingPropertyDefinition.Name: {
+            prop.Name: prop.NominalValue.wrappedValue for prop in rel.RelatingPropertyDefinition.HasProperties
+        }
+        for rel in element.IsDefinedBy
+        if rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
+    }["Pset_Растительность"]
+    assert pset["Высота_м"] == pytest.approx(18.0)
+    assert pset["Источник_высоты"] == "факт"
+
+
+def test_shrub_is_shorter_than_tree_in_mesh_geometry():
+    """Геометрическая, а не только Pset, проверка: высота меша куста
+    (Шаг 2.9) заметно меньше высоты меша дерева (сравнение внутри одного
+    файла - см. docstring `_mesh_coords`, значения в мм файла, не в метрах)."""
+    f, _ = build_site_ifc("IFC4", _make_site_model_with_vegetation_extras(), BASE_POINT)
+    tree = next(e for e in f.by_type("IfcGeographicElement") if (e.Name or "").startswith("Дерево 60"))
+    shrub = next(e for e in f.by_type("IfcGeographicElement") if (e.Name or "").startswith("Куст 61"))
+
+    def _z_span(element):
+        zs = [c[2] for c in _mesh_coords(element)]
+        return max(zs) - min(zs)
+
+    assert _z_span(shrub) < _z_span(tree)
+
+
+def test_road_network_filter_excludes_vegetation_extras():
+    f, registry = build_site_ifc(
+        "IFC4", _make_site_model_with_vegetation_extras(), BASE_POINT, road_network_filter=NETWORK_INTERNAL
+    )
+    assert f.by_type("IfcFurniture") == []
+    geo_names = [e.Name for e in f.by_type("IfcGeographicElement")]
+    assert not any((n or "").startswith("Куст") for n in geo_names)
+    assert not any((n or "").startswith("Газон") for n in geo_names)
     assert not any(layer == "osm_landscaping" for layer, _, _ in registry)
 
 

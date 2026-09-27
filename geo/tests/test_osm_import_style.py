@@ -102,6 +102,11 @@ SAMPLE_OSM_XML = """\
     <tag k="railway" v="level_crossing"/>
   </node>
 
+  <node id="160" lat="58.0150" lon="56.2060" version="1"/>
+  <node id="161" lat="58.0150" lon="56.2070" version="1"/>
+  <node id="162" lat="58.0155" lon="56.2070" version="1"/>
+  <node id="163" lat="58.0155" lon="56.2060" version="1"/>
+
   <way id="100" version="1">
     <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/>
     <tag k="building" v="yes"/>
@@ -148,6 +153,10 @@ SAMPLE_OSM_XML = """\
   <way id="130" version="1">
     <nd ref="140"/><nd ref="141"/><nd ref="142"/><nd ref="143"/><nd ref="140"/>
     <tag k="railway" v="platform"/>
+  </way>
+  <way id="135" version="1">
+    <nd ref="160"/><nd ref="161"/><nd ref="162"/><nd ref="163"/><nd ref="160"/>
+    <tag k="natural" v="scrub"/>
   </way>
 
   <relation id="200" version="1">
@@ -277,6 +286,7 @@ def test_vegetation_power_landscaping_present(osm_test_db):
     veg = {r[0]: r[1] for r in _fetchall(osm_test_db, "SELECT osm_id, tags FROM osm_vegetation")}
     assert veg[50] == {"natural": "tree", "species": "Betula pendula"}
     assert veg[106] == {"natural": "wood"}
+    assert veg[135] == {"natural": "scrub"}  # Шаг 2.9 - кустарник в общей таблице растительности
 
     power = {r[0]: r[1] for r in _fetchall(osm_test_db, "SELECT osm_id, tags FROM osm_power")}
     assert power[51]["power"] == "pole"
@@ -284,6 +294,9 @@ def test_vegetation_power_landscaping_present(osm_test_db):
 
     landscaping = _fetchall(osm_test_db, "SELECT tags FROM osm_landscaping WHERE osm_id = 52")
     assert landscaping[0][0] == {"amenity": "bench"}
+
+    scrub_geom = _fetchall(osm_test_db, "SELECT ST_GeometryType(geom) FROM osm_vegetation WHERE osm_id = 135")
+    assert scrub_geom[0][0] == "ST_Polygon"
 
 
 def test_building_part_and_entrance_present(osm_test_db):

@@ -35,7 +35,7 @@ from shapely.geometry import Point, box
 
 from topology_geo.geometry.bridges import BridgeRibbon
 from topology_geo.geometry.buildings import BuildingSolid
-from topology_geo.geometry.landscaping import FENCE_POST_RADIUS_M, FenceSegment, StreetLamp
+from topology_geo.geometry.landscaping import FENCE_POST_RADIUS_M, Bench, FenceSegment, StreetLamp
 from topology_geo.geometry.rail import (
     POLE_HEIGHT_M,
     POLE_RADIUS_M,
@@ -62,7 +62,7 @@ from topology_geo.geometry.roofs import (
     oriented_bounding_box,
 )
 from topology_geo.geometry.streets import IntersectionArea, LaneMarking, LaneRibbon
-from topology_geo.geometry.vegetation import TreePoint
+from topology_geo.geometry.vegetation import LawnArea, ShrubPoint, TreePoint
 from topology_geo.geometry.water import WaterArea, WaterwayRibbon
 from topology_geo.relief.tin import SiteTin, build_profile_elevation_fn, long_axis_line
 
@@ -180,7 +180,10 @@ class SiteModel:
     power_safety_zones: list[PowerSafetyZone] = field(default_factory=list)
     fences: list[FenceSegment] = field(default_factory=list)
     streetlamps: list[StreetLamp] = field(default_factory=list)
+    benches: list[Bench] = field(default_factory=list)
     trees: list[TreePoint] = field(default_factory=list)
+    shrubs: list[ShrubPoint] = field(default_factory=list)
+    lawns: list[LawnArea] = field(default_factory=list)
     lanes: list[LaneRibbon] = field(default_factory=list)
     intersections: list[IntersectionArea] = field(default_factory=list)
     markings: list[LaneMarking] = field(default_factory=list)
@@ -885,15 +888,62 @@ def build_site_ifc(
 
     for i, tree in enumerate(site_model.trees if road_network_filter is None else []):
         z = _terrain_elevation(tree.x, tree.y) or 0.0
-        verts, faces = mesh_cylinder(0.15, 6.0, segments=6)
+        verts, faces = mesh_cylinder(0.15, tree.height_m, segments=6)
         verts = [(x + tree.x, y + tree.y, zz + z) for x, y, zz in verts]
         product = _add_mesh_product(
             f, body_context, "IfcGeographicElement", f"Дерево {tree.source_osm_id}-{i}", "USERDEFINED",
             (verts, faces),
-            {"Pset_Растительность": {"Порода": tree.species, "Источник": tree.confidence}},
+            {
+                "Pset_Растительность": {
+                    "Порода": tree.species, "Источник": tree.confidence,
+                    "Высота_м": round(tree.height_m, 3), "Источник_высоты": tree.height_confidence,
+                }
+            },
         )
         products.append(product)
         registry.append(("osm_vegetation", tree.source_osm_id, product.GlobalId))
+
+    # Кустарники (Шаг 2.9, `natural=scrub`) - ниже дерева, рассеяны внутри
+    # полигона массива кустарника; регистрируются в реестр тем же приёмом,
+    # что и рассеянные деревья леса выше (несколько на один `source_osm_id`
+    # полигона - тот же известный нюанс `ON CONFLICT`, что и там).
+    for i, shrub in enumerate(site_model.shrubs if road_network_filter is None else []):
+        z = _terrain_elevation(shrub.x, shrub.y) or 0.0
+        verts, faces = mesh_cylinder(0.15, shrub.height_m, segments=6)
+        verts = [(x + shrub.x, y + shrub.y, zz + z) for x, y, zz in verts]
+        product = _add_mesh_product(
+            f, body_context, "IfcGeographicElement", f"Куст {shrub.source_osm_id}-{i}", "USERDEFINED",
+            (verts, faces), {"Pset_Растительность": {"Тип": "куст", "Высота_м": round(shrub.height_m, 3)}},
+        )
+        products.append(product)
+        registry.append(("osm_vegetation", shrub.source_osm_id, product.GlobalId))
+
+    # Газоны (Шаг 2.9, `landuse=grass`) - плоская поверхность на рельефе,
+    # тот же приём, что и у ленты дороги/воды.
+    for lawn in (site_model.lawns if road_network_filter is None else []):
+        polys = lawn.polygon.geoms if lawn.polygon.geom_type.startswith("Multi") else [lawn.polygon]
+        for poly in polys:
+            mesh = flat_polygon_mesh(poly, _terrain_elevation)
+            product = _add_mesh_product(
+                f, body_context, "IfcGeographicElement", f"Газон {lawn.osm_id}", "USERDEFINED",
+                mesh, {"Pset_Растительность": {"Тип": "газон"}},
+            )
+            products.append(product)
+            registry.append(("osm_vegetation", lawn.osm_id, product.GlobalId))
+
+    # Скамейки (Шаг 2.9, `amenity=bench`) - упрощённый плоский короб.
+    for bench in (site_model.benches if road_network_filter is None else []):
+        z = _terrain_elevation(bench.x, bench.y) or 0.0
+        footprint = box(-bench.length_m / 2, -bench.depth_m / 2, bench.length_m / 2, bench.depth_m / 2)
+        mesh = extrude_polygon_mesh(footprint, 0.0, bench.seat_height_m)
+        verts, faces = mesh
+        verts = [(x + bench.x, y + bench.y, zz + z) for x, y, zz in verts]
+        product = _add_mesh_product(
+            f, body_context, "IfcFurniture", f"Скамейка {bench.osm_id}", "USERDEFINED",
+            (verts, faces), {"Pset_Благоустройство": {"Тип": "скамейка"}},
+        )
+        products.append(product)
+        registry.append(("osm_landscaping", bench.osm_id, product.GlobalId))
 
     if products:
         ifcopenshell.api.spatial.assign_container(f, products=products, relating_structure=site)

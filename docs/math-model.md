@@ -27,6 +27,7 @@ flowchart LR
         T14["§2.15 Ж/д и трамвай: насыпь/платформы/переезды/опоры<br/>geometry/rail.py"]:::done
         T15["§2.16 Электросети: опоры/провода/зоны<br/>geometry/power.py"]:::done
         T16["§2.17 Библиотека элементов: каталог/ограждения/фонари/текстуры<br/>assets/library.py"]:::done
+        T17["§2.18 Растительность: высота/плотность по типу/газон/куст/скамейка<br/>geometry/vegetation.py"]:::done
     end
     subgraph Заготовка
         T5["§2.6 Огибающая застройки"]:::todo
@@ -51,6 +52,7 @@ flowchart LR
     T6 -.Шаг 2.6.-> T14
     T6 -.Шаг 2.7.-> T15
     T6 -.Шаг 2.8.-> T16
+    T6 -.Шаг 2.9.-> T17
 
     classDef done fill:#bbf7d0,stroke:#15803d,color:#111;
     classDef todo fill:#e5e7eb,stroke:#6b7280,color:#111;
@@ -983,6 +985,52 @@ OpenGL-конвенция — совпадает с glTF/GLB, куда IFC ко�
 сетка для рендера помимо упрощённого IFC-тела (п. 5 — этого пайплайна в
 проекте вообще пока нет, Этап 4 не достигнут). Подробности —
 `docs/asset-library.md`.
+
+### 2.18 Растительность и благоустройство: высота дерева, плотность по типу леса, газон, кустарник, скамейка (Шаг 2.9) — реализовано (частично)
+
+Код: `geo/src/topology_geo/geometry/vegetation.py`,
+`geometry/landscaping.py`, `selection/normalize.py`. Тесты:
+`test_geometry_environment.py` (+14), `test_geometry_landscaping.py` (+2),
+`test_selection_normalize.py` (+3), `test_ifc_assemble.py` (+4).
+Подробности — `docs/vegetation.md`.
+
+**Высота дерева** — `height` тег как есть; без тега `DEFAULT_TREE_HEIGHT_M
+= 12 м`, независимо от источника породы (`species`/`confidence` — своя
+пара полей, `height_m`/`height_confidence` — своя).
+
+**Плотность массива по типу леса**:
+```
+density(полигон) = FOREST_DENSITY_PER_HA_BY_LEAF_TYPE.get(leaf_type, DEFAULT_FOREST_DENSITY_PER_HA)
+                  = {needleleaved: 500, mixed: 400, broadleaved: 350}.get(leaf_type, 400)
+```
+Типовые иллюстративные значения, не из авторитетного источника
+лесоустройства — тот же принцип честности, что и у остальных типовых
+констант конвейера.
+
+**Газон отдельно от леса** — до этого шага `landuse=grass` проходил через
+ТОТ ЖЕ `scatter_forest_trees`, что и настоящий лес, получая идентичную
+плотность 400 дер./га (реальная неточность Шага 1.7, не замеченная до
+явной проверки условий фильтра). Исправлено: `scatter_forest_trees`
+исключает `landuse=grass` (и `natural=scrub`) явной проверкой тегов;
+`build_lawns` — отдельный генератор плоской поверхности без деревьев.
+
+**Кустарник** (`natural=scrub`) — новый тег для импорта (`style.lua`, та же
+таблица `osm_vegetation`), `scatter_shrubs` — тот же метод отбраковки
+(rejection sampling), что и `scatter_forest_trees`, с параметрами вместо
+леса: `SHRUB_HEIGHT_M=1,2 м`, `SHRUB_DENSITY_PER_HA=1500/га` (ниже и гуще
+дерева — реалистичное соотношение, не точный расчёт).
+
+**Скамейка** (`amenity=bench`) — упрощённый плоский короб
+(`extrude_polygon_mesh` на прямоугольник 1,5×0,5 м, высота 0,45 м), без
+ориентации. `IfcFurniture` — нативный класс в обеих схемах (IFC4/IFC4X3),
+`IfcFurnitureTypeEnum` не содержит значения `BENCH` ни в одной (эмпирически
+подтверждено через ifcopenshell, тот же метод проверки, что и у `IfcRailing
+TypeEnum`/`FENCE` в §2.17) → `PredefinedType=USERDEFINED`.
+
+Не реализовано (честно): дифференциация по конкретному виду (`species`)
+вместо огрублённого `leaf_type`; ориентация скамейки; готовые детальные
+3D-модели растительности/МАФ (тот же пробел, что и у §2.17, п. 3).
+Подробности — `docs/vegetation.md`.
 
 ## 3. Как обновлять этот документ
 

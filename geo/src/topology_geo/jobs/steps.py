@@ -19,7 +19,7 @@ from affine import Affine
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.geometry.bridges import build_bridge_ribbons
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
-from topology_geo.geometry.landscaping import build_fences, build_streetlamps
+from topology_geo.geometry.landscaping import build_benches, build_fences, build_streetlamps
 from topology_geo.geometry.power import (
     build_poles,
     build_power_safety_zones,
@@ -36,7 +36,12 @@ from topology_geo.geometry.rail import (
 from topology_geo.geometry.road_network import NETWORK_BACKBONE, NETWORK_INTERNAL
 from topology_geo.geometry.roads import build_road_ribbons
 from topology_geo.geometry.streets import StreetNetwork, build_lane_network, is_osm2streets_available
-from topology_geo.geometry.vegetation import build_individual_trees, scatter_forest_trees
+from topology_geo.geometry.vegetation import (
+    build_individual_trees,
+    build_lawns,
+    scatter_forest_trees,
+    scatter_shrubs,
+)
 from topology_geo.geometry.water import build_water_areas, build_waterway_ribbons
 from topology_geo.ifc.assemble import BasePoint, SiteModel, build_site_ifc
 from topology_geo.ifc.generate_test_ifc import validate_model
@@ -192,6 +197,13 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     2.6/2.7/2.3). Библиотека элементов (п. 1, каталог + PBR-текстуры Poly
     Haven, п. 4) — `topology_geo.assets`, подробности `docs/asset-library.md`.
 
+    Растительность и благоустройство (Шаг 2.9, `geometry.vegetation`/
+    `geometry.landscaping`): высота дерева из `height`, плотность массива
+    по типу леса (`leaf_type`), газон (`landuse=grass`) выделен из леса в
+    плоскую поверхность без рассеивания деревьев, кустарник (`natural=
+    scrub`) — отдельная более низкая/частая расстановка, скамейки
+    (`amenity=bench`). Подробности — `docs/vegetation.md`.
+
     Мосты (Шаг 2.5, п. 1-3, `geometry.bridges.build_bridge_ribbons`) строятся
     ПОСЛЕ `roads`/`rail` — габарит проверяется по их осям (`RoadRibbon.axis`/
     `RailRibbon.axis`)."""
@@ -219,7 +231,14 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     platforms = build_platform_areas(dataset.features)
     level_crossings = build_level_crossings(dataset.features, rail)
     catenary_poles = place_catenary_poles(dataset.features)
+    # Растительность (Шаг 2.9): высота дерева из `height` и плотность
+    # массива по типу леса теперь внутри `build_individual_trees`/
+    # `scatter_forest_trees` самих (см. модуль); газон (`landuse=grass`)
+    # выделен из леса в свою плоскую поверхность, кустарник
+    # (`natural=scrub`) - отдельная более низкая/частая расстановка.
     trees = build_individual_trees(dataset.features) + scatter_forest_trees(dataset.features)
+    shrubs = scatter_shrubs(dataset.features)
+    lawns = build_lawns(dataset.features)
 
     # Электросети с опорами (Шаг 2.7) - реальные опоры/башни по точкам OSM,
     # расчётная расстановка только для линий без единой реальной опоры
@@ -237,6 +256,7 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     # бордюр уже параметрические с более ранних шагов.
     fences = build_fences(dataset.features)
     streetlamps = build_streetlamps(dataset.features)
+    benches = build_benches(dataset.features)
 
     # Мосты, путепроводы (Шаг 2.5, п. 1-3) - габарит проверяется по осям уже
     # построенных немостовых дорог/путей (`RoadRibbon.axis`/`RailRibbon.axis`,
@@ -264,8 +284,8 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         platforms=platforms, level_crossings=level_crossings, catenary_poles=catenary_poles,
         power_poles=power_poles, power_wires=power_wires, substations=substations,
         power_safety_zones=power_safety_zones,
-        fences=fences, streetlamps=streetlamps,
-        trees=trees,
+        fences=fences, streetlamps=streetlamps, benches=benches,
+        trees=trees, shrubs=shrubs, lawns=lawns,
         lanes=street_network.lanes, intersections=street_network.intersections, markings=street_network.markings,
     )
     base_point = BasePoint(
@@ -330,7 +350,10 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
         "power_safety_zones": len(power_safety_zones),
         "fences": len(fences),
         "streetlamps": len(streetlamps),
+        "benches": len(benches),
         "trees": len(trees),
+        "shrubs": len(shrubs),
+        "lawns": len(lawns),
         "lanes": len(street_network.lanes),
         "intersections": len(street_network.intersections),
         "markings": len(street_network.markings),

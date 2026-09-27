@@ -1,12 +1,13 @@
-"""Ограждения и фонари (Шаг 2.8, п. 2: «параметрические генераторы: опоры,
-столбы, бордюры, ограждения, пролёты, фонари»). Опоры/столбы — уже
-параметрические (рельсы — Шаг 2.6 `geometry.rail`, ЛЭП — Шаг 2.7
-`geometry.power`), бордюр — Шаг 2.3 `geometry.streets`; здесь — оставшиеся
-типы, которых не было ни у одного предыдущего шага.
+"""Ограждения, фонари и скамейки (Шаг 2.8, п. 2: «параметрические
+генераторы: опоры, столбы, бордюры, ограждения, пролёты, фонари»; скамейки
+— Шаг 2.9, действие «...скамейки»). Опоры/столбы — уже параметрические
+(рельсы — Шаг 2.6 `geometry.rail`, ЛЭП — Шаг 2.7 `geometry.power`), бордюр
+— Шаг 2.3 `geometry.streets`; здесь — оставшиеся типы, которых не было ни у
+одного предыдущего шага.
 
-`osm2pgsql` (Шаг 1.1) уже собирает `barrier=fence/wall` (линии) и
-`highway=street_lamp` (точки) в таблицу `osm_landscaping` — изменений
-импорта не потребовалось.
+`osm2pgsql` (Шаг 1.1) уже собирает `barrier=fence/wall` (линии),
+`highway=street_lamp` и `amenity=bench` (точки) в таблицу `osm_landscaping`
+— изменений импорта не потребовалось.
 """
 
 from __future__ import annotations
@@ -35,6 +36,14 @@ STREETLAMP_POLE_RADIUS_M = 0.08
 STREETLAMP_HEAD_RADIUS_M = 0.15
 STREETLAMP_HEAD_HEIGHT_M = 0.3
 
+# Скамейка (Шаг 2.9, `amenity=bench`) - упрощённо один плоский короб
+# (сиденье), без спинки/ножек по отдельности; типовые габариты, OSM почти
+# никогда не даёт ориентацию скамейки (`direction`), поэтому короб всегда
+# по осям координат - известное упрощение.
+BENCH_LENGTH_M = 1.5
+BENCH_DEPTH_M = 0.5
+BENCH_SEAT_HEIGHT_M = 0.45
+
 
 @dataclass(frozen=True)
 class FenceSegment:
@@ -54,6 +63,16 @@ class StreetLamp:
     pole_radius_m: float
     head_radius_m: float
     head_height_m: float
+
+
+@dataclass(frozen=True)
+class Bench:
+    osm_id: int
+    x: float
+    y: float
+    length_m: float
+    depth_m: float
+    seat_height_m: float
 
 
 def _as_lines(geom):
@@ -126,6 +145,25 @@ def build_streetlamps(features: list[SiteFeature]) -> list[StreetLamp]:
                 osm_id=feature.osm_id, x=feature.geometry.x, y=feature.geometry.y,
                 pole_height_m=STREETLAMP_POLE_HEIGHT_M, pole_radius_m=STREETLAMP_POLE_RADIUS_M,
                 head_radius_m=STREETLAMP_HEAD_RADIUS_M, head_height_m=STREETLAMP_HEAD_HEIGHT_M,
+            )
+        )
+    return result
+
+
+def build_benches(features: list[SiteFeature]) -> list[Bench]:
+    """Скамейки (`amenity=bench`, точки), Шаг 2.9 - упрощённо один плоский
+    короб типовых габаритов, без ориентации (см. докстринг модуля/
+    `BENCH_*`)."""
+    result: list[Bench] = []
+    for feature in features:
+        if feature.layer != "osm_landscaping" or feature.geometry.geom_type != "Point":
+            continue
+        if str(feature.raw_tags.get("amenity", "")).strip().lower() != "bench":
+            continue
+        result.append(
+            Bench(
+                osm_id=feature.osm_id, x=feature.geometry.x, y=feature.geometry.y,
+                length_m=BENCH_LENGTH_M, depth_m=BENCH_DEPTH_M, seat_height_m=BENCH_SEAT_HEIGHT_M,
             )
         )
     return result

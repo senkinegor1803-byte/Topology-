@@ -65,7 +65,7 @@ local tables = {
     railway_crossings = def_table('osm_railway_crossings', 'point'),    -- railway=level_crossing/crossing, точки (Шаг 2.6)
     water_areas = def_table('osm_water_areas', 'geometry'),    -- полигоны/мультиполигоны
     waterways = def_table('osm_waterways', 'linestring'),
-    vegetation = def_table('osm_vegetation', 'geometry'),      -- точки (дерево) + полигоны (лес/газон)
+    vegetation = def_table('osm_vegetation', 'geometry'),      -- точки (дерево) + полигоны (лес/газон/кустарник, Шаг 2.9)
     power = def_table('osm_power', 'geometry'),                -- точки (опоры) + линии (провода) + полигоны (подстанции)
     landscaping = def_table('osm_landscaping', 'geometry'),    -- скамейки, фонари, ограждения, площадки
     entrances = def_table('osm_entrances', 'point'),            -- entrance=*, точки (Шаг 2.2, п. 3)
@@ -169,7 +169,7 @@ function osm2pgsql.process_way(object)
         return
     end
 
-    if tags.natural == 'wood' or tags.landuse == 'forest' or tags.landuse == 'grass' then
+    if tags.natural == 'wood' or tags.landuse == 'forest' or tags.landuse == 'grass' or tags.natural == 'scrub' then
         insert_way_geom(tables.vegetation, object, true)
         return
     end
@@ -206,7 +206,7 @@ function osm2pgsql.process_relation(object)
         tables.buildings:insert({ tags = tags, geom = object:as_multipolygon() })
     elseif tags.natural == 'water' or tags.landuse == 'reservoir' then
         tables.water_areas:insert({ tags = tags, geom = object:as_multipolygon() })
-    elseif tags.natural == 'wood' or tags.landuse == 'forest' then
+    elseif tags.natural == 'wood' or tags.landuse == 'forest' or tags.natural == 'scrub' then
         tables.vegetation:insert({ tags = tags, geom = object:as_multipolygon() })
     end
 end

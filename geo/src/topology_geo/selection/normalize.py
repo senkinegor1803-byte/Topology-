@@ -145,13 +145,29 @@ def normalize_power(tags: Mapping[str, str]) -> dict[str, NormalizedAttribute]:
     return {"voltage_kv": NormalizedAttribute(voltage_kv, confidence)}
 
 
+LEAF_TYPE_LABELS = {
+    "broadleaved": "лиственное",
+    "needleleaved": "хвойное",
+    "mixed": "смешанное",
+}
+
+
 def normalize_vegetation(tags: Mapping[str, str]) -> dict[str, NormalizedAttribute]:
     """Порода дерева (словарь данных §2: `species`/`leaf_type`) — не входит в
     список Шага 1.4, п. 3 дословно, но уже описана в словаре Шага 0.8 и нужна
-    следующим генераторам не меньше остальных."""
+    следующим генераторам не меньше остальных. `species`/`genus` — как есть
+    (конкретное название); при их отсутствии — `leaf_type` (Шаг 2.9,
+    действие «порода из species/leaf_type» дословно), огрублённый общий
+    признак (лиственное/хвойное/смешанное), тоже «факт» — это реальное
+    значение тега, просто менее конкретное, чем видовое название."""
     species = _non_empty_str(tags.get("species")) or _non_empty_str(tags.get("genus"))
-    confidence = CONFIDENCE_FACT if species else CONFIDENCE_DEFAULT
-    return {"species": NormalizedAttribute(species, confidence)}
+    if species:
+        return {"species": NormalizedAttribute(species, CONFIDENCE_FACT)}
+    leaf_type = _non_empty_str(tags.get("leaf_type"))
+    label = LEAF_TYPE_LABELS.get((leaf_type or "").lower())
+    if label:
+        return {"species": NormalizedAttribute(label, CONFIDENCE_FACT)}
+    return {"species": NormalizedAttribute(None, CONFIDENCE_DEFAULT)}
 
 
 NORMALIZERS: dict[str, Any] = {

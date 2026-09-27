@@ -1,6 +1,7 @@
-"""Тесты Шага 2.8, п. 2: ограждения/стены (с пролётами столбов) и фонари —
-недостающие параметрические генераторы («опоры, столбы, бордюры,
-ограждения, пролёты, фонари»; опоры/столбы/бордюр реализованы раньше)."""
+"""Тесты Шага 2.8, п. 2 (ограждения/стены с пролётами столбов, фонари) и
+Шага 2.9 (скамейки) — недостающие параметрические генераторы («опоры,
+столбы, бордюры, ограждения, пролёты, фонари ... скамейки»; опоры/столбы/
+бордюр реализованы раньше)."""
 
 from __future__ import annotations
 
@@ -8,14 +9,18 @@ import pytest
 from shapely.geometry import LineString, Point
 
 from topology_geo.geometry.landscaping import (
+    BENCH_DEPTH_M,
+    BENCH_LENGTH_M,
     DEFAULT_FENCE_HEIGHT_M,
     DEFAULT_WALL_HEIGHT_M,
     FENCE,
     STREETLAMP_POLE_HEIGHT_M,
     WALL,
     WALL_THICKNESS_M,
+    Bench,
     FenceSegment,
     StreetLamp,
+    build_benches,
     build_fences,
     build_streetlamps,
 )
@@ -91,3 +96,24 @@ def test_build_streetlamps_ignores_non_point_and_other_highway_values():
     line_feature = _feature("osm_landscaping", LineString([(0, 0), (1, 1)]), raw_tags={"highway": "street_lamp"})
     other_highway = _feature("osm_landscaping", Point(0, 0), raw_tags={"highway": "residential"})
     assert build_streetlamps([line_feature, other_highway]) == []
+
+
+# --- build_benches (Шаг 2.9) --------------------------------------------------
+
+
+def test_build_benches_reads_point_with_defaults():
+    feature = _feature("osm_landscaping", Point(3, 4), osm_id=11, raw_tags={"amenity": "bench"})
+    benches = build_benches([feature])
+    assert len(benches) == 1
+    bench = benches[0]
+    assert isinstance(bench, Bench)
+    assert bench.osm_id == 11
+    assert (bench.x, bench.y) == (3.0, 4.0)
+    assert bench.length_m == pytest.approx(BENCH_LENGTH_M)
+    assert bench.depth_m == pytest.approx(BENCH_DEPTH_M)
+
+
+def test_build_benches_ignores_non_point_and_other_amenity_values():
+    line_feature = _feature("osm_landscaping", LineString([(0, 0), (1, 1)]), raw_tags={"amenity": "bench"})
+    other_amenity = _feature("osm_landscaping", Point(0, 0), raw_tags={"amenity": "waste_basket"})
+    assert build_benches([line_feature, other_amenity]) == []
