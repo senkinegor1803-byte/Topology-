@@ -35,17 +35,17 @@ from topology_geo.siting.checks import Collision
 # покрытием кириллицы, уже установлен в этой среде.
 _DEJAVU_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-_FONT_NAME = "DejaVuSans"
-_FONT_NAME_BOLD = "DejaVuSans-Bold"
+FONT_NAME = "DejaVuSans"
+FONT_NAME_BOLD = "DejaVuSans-Bold"
 
 
-def _register_cyrillic_fonts() -> None:
-    if _FONT_NAME in pdfmetrics.getRegisteredFontNames():
+def register_cyrillic_fonts() -> None:
+    if FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return
     if not os.path.isfile(_DEJAVU_REGULAR):
         raise RuntimeError(f"шрифт с поддержкой кириллицы не найден: {_DEJAVU_REGULAR}")
-    pdfmetrics.registerFont(TTFont(_FONT_NAME, _DEJAVU_REGULAR))
-    pdfmetrics.registerFont(TTFont(_FONT_NAME_BOLD, _DEJAVU_BOLD))
+    pdfmetrics.registerFont(TTFont(FONT_NAME, _DEJAVU_REGULAR))
+    pdfmetrics.registerFont(TTFont(FONT_NAME_BOLD, _DEJAVU_BOLD))
 
 
 @dataclass(frozen=True)
@@ -58,12 +58,12 @@ def build_placement_report_pdf(
     *, site_name: str, design_elevation_m: float, footprint_area_m2: float,
     cut_m3: float, fill_m3: float, collisions: list[Collision], sources: list[SourceEntry],
 ) -> bytes:
-    _register_cyrillic_fonts()
+    register_cyrillic_fonts()
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, title=f"Отчёт посадки: {site_name}")
     styles = getSampleStyleSheet()
     for style_name in ("Title", "Heading2", "Normal"):
-        styles[style_name].fontName = _FONT_NAME
+        styles[style_name].fontName = FONT_NAME
     elements: list[Any] = []
 
     elements.append(Paragraph(f"Отчёт посадки: {site_name}", styles["Title"]))
@@ -87,7 +87,7 @@ def build_placement_report_pdf(
             ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("FONTNAME", (0, 0), (-1, -1), _FONT_NAME),
+            ("FONTNAME", (0, 0), (-1, -1), FONT_NAME),
         ]))
         elements.append(table)
     else:
@@ -102,7 +102,7 @@ def build_placement_report_pdf(
             ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("FONTNAME", (0, 0), (-1, -1), _FONT_NAME),
+            ("FONTNAME", (0, 0), (-1, -1), FONT_NAME),
         ]))
         elements.append(table)
     else:
