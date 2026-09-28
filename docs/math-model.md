@@ -30,6 +30,7 @@ flowchart LR
         T17["§2.18 Растительность: высота/плотность по типу/газон/куст/скамейка<br/>geometry/vegetation.py"]:::done
         T18["§2.19 Выходные форматы: федеративные IFC-слои, LandXML/CityJSON/DXF, meta.json<br/>export/*.py, jobs/steps.py"]:::done
         T19["§2.20 3D Tiles: иерархия LOD по кольцам, потоковая загрузка<br/>tiling/{gltf_mesh,tile_content,tileset}.py"]:::done
+        T20["§2.21 Карта города: тайлы Web Mercator, terrain-RGB<br/>citymap/{terrain_rgb,cli}.py"]:::done
     end
     subgraph Заготовка
         T5["§2.6 Огибающая застройки"]:::todo
@@ -1172,6 +1173,63 @@ Storage-ключей заранее.
 целевом оборудовании («≥30 кадров/с на ноутбуке со встроенной графикой») —
 недоступна AI-сессии без реального устройства/GPU. Подробности —
 `docs/streaming-viewer.md`.
+
+### 2.21 Карта города: тайлы Web Mercator, кодировка terrain-RGB (Шаг 2.12) — реализовано (частично)
+
+Код: `geo/src/topology_geo/citymap/{terrain_rgb,cli}.py`, `web/citymap/
+index.html`. Тесты: `test_citymap_terrain_rgb.py` (9), `test_citymap_cli.py`
+(2), `test_citymap_api.py` (4), `test_citymap_browser.py` (4, в настоящем
+headless Chromium). Подробности — `docs/citymap.md`.
+
+**Границы XYZ-тайла в Web Mercator** (`tile_bounds_3857`) — стандартная
+формула слайпи-карт (Google/OSM-схема, `y=0` сверху), НЕ придумана для
+проекта:
+
+```
+tile_size = C / 2^z                      (C = 40 075 016.685 785 м — длина экватора)
+minx = x · tile_size − C/2
+maxx = (x+1) · tile_size − C/2
+maxy = C/2 − y · tile_size
+miny = C/2 − (y+1) · tile_size
+```
+
+Обратная функция (`lonlat_to_tile`, WGS-84 → индекс тайла) — тоже
+стандартная формула слайпи-карт:
+
+```
+n = 2^z
+x = ⌊(lon + 180) / 360 · n⌋
+y = ⌊(1 − ln(tan(lat_rad) + 1/cos(lat_rad)) / π) / 2 · n⌋
+```
+
+Реализовано напрямую через `rasterio`/GDAL (репроекция в EPSG:3857 через
+`rasterio.warp.reproject`, запись PNG через `rasterio.io.MemoryFile`) —
+без добавления `mercantile`, второй библиотеки с тем же результатом.
+
+**Кодировка высоты terrain-RGB** (`encode_terrain_rgb`/`decode_terrain_
+rgb`) — формат Mapbox Terrain-RGB, общепринятый (не придуман для проекта),
+тот же, что понимает `raster-dem`-источник MapLibre GL
+(`encoding: "mapbox"`):
+
+```
+value = round((height_m − (−10000)) / 0.1)     (0 ≤ value ≤ 256³−1)
+R = ⌊value / 65536⌋ mod 256
+G = ⌊value / 256⌋ mod 256
+B = value mod 256
+
+height_m = −10000 + (R·65536 + G·256 + B) · 0.1
+```
+
+Шаг 0.1 м, диапазон примерно −10000…+6553.5 м; значения вне диапазона
+обрезаются (`np.clip`) — честно, не переполняются молча. Обратимость
+кодирования проверена в тестах (`atol=0.05`, т.е. в пределах шага
+квантования), а также контрольным значением (0 м → RGB (1,134,160),
+посчитано вручную независимо от реализации).
+
+Не реализовано (честно): автоматическая еженедельная пересборка PMTiles
+всего города, слой ЛЭП (нет в стандартной схеме OpenMapTiles), слои
+ограничений/кадастра (Этап 3), TessaDEM как конкретный источник рельефа —
+подробности `docs/citymap.md`.
 
 ## 3. Как обновлять этот документ
 

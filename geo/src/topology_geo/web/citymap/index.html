@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Топология — карта города</title>
+<link rel="stylesheet" href="./vendor/maplibre-gl.css" />
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, sans-serif; background: #14161a; color: #e6e6e6; }
+  #app { display: flex; height: 100%; width: 100%; }
+  #panel {
+    width: 300px; flex: 0 0 auto; background: #1c1f24; overflow-y: auto;
+    padding: 12px; border-right: 1px solid #2a2e35;
+  }
+  #map-wrap { flex: 1 1 auto; position: relative; min-width: 0; }
+  #map { width: 100%; height: 100%; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #9aa4b2; margin: 16px 0 8px; }
+  p.hint { font-size: 12px; color: #9aa4b2; margin: 4px 0 0; }
+  .field { margin-bottom: 8px; }
+  .field label { display: block; font-size: 12px; color: #9aa4b2; margin-bottom: 3px; }
+  .field input, .field select { width: 100%; background: #22262d; border: 1px solid #2a2e35; color: #e6e6e6; padding: 5px 6px; border-radius: 4px; font-size: 13px; }
+  button { width: 100%; background: #35507a; border: none; color: #fff; padding: 8px 10px; border-radius: 4px; font-size: 13px; cursor: pointer; margin-top: 4px; }
+  button:disabled { background: #2a2e35; color: #6b7280; cursor: not-allowed; }
+  button.toggle { width: auto; background: #22262d; border: 1px solid #2a2e35; }
+  button.toggle.active { background: #35507a; }
+  #toggle-row { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; z-index: 5; }
+  #job-status { font-size: 12px; color: #c3cad4; margin-top: 8px; white-space: pre-wrap; }
+  #job-status a { color: #7fb2ff; }
+  #attribution-text { font-size: 11px; color: #6b7280; line-height: 1.5; }
+  #error-banner {
+    display: none; position: absolute; top: 0; left: 0; right: 0; padding: 10px 16px;
+    background: #7a2020; color: #fff; font-size: 13px; z-index: 10;
+  }
+  .maplibregl-popup-content { background: #1c1f24; color: #e6e6e6; font-size: 12px; }
+  .maplibregl-popup-tip { border-top-color: #1c1f24 !important; border-bottom-color: #1c1f24 !important; }
+  @media (max-width: 720px) {
+    #app { flex-direction: column; }
+    #panel { width: 100%; height: 220px; border: none; border-bottom: 1px solid #2a2e35; order: 2; }
+    #map-wrap { flex: 1 1 auto; order: 1; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="panel">
+    <h1>Топология</h1>
+    <p class="hint">Публичная карта города (Шаг 2.12). Кликните по карте, чтобы выбрать точку участка.</p>
+
+    <div id="map-status" class="hint">Загрузка карты…</div>
+
+    <h2>Выбранная точка</h2>
+    <div id="picked-point" class="hint">не выбрана</div>
+
+    <h2>Построить модель</h2>
+    <div class="field">
+      <label for="radius">Радиус участка, м (500–3000)</label>
+      <input type="number" id="radius" min="500" max="3000" step="50" value="500" />
+    </div>
+    <button id="build-btn" disabled>Построить модель участка здесь</button>
+    <div id="job-status"></div>
+
+    <h2>Источники и лицензии</h2>
+    <div id="attribution-text">
+      Векторные тайлы: © <a href="https://www.openmaptiles.org/" style="color:#7fb2ff">OpenMapTiles</a>
+      © <a href="https://www.openstreetmap.org/copyright" style="color:#7fb2ff">OpenStreetMap</a> contributors.
+      Рельеф: SRTM / OpenTopoData. Карта: <a href="https://maplibre.org/" style="color:#7fb2ff">MapLibre GL JS</a>,
+      архив тайлов: <a href="https://protomaps.com/" style="color:#7fb2ff">PMTiles</a>.
+    </div>
+  </div>
+  <div id="map-wrap">
+    <div id="error-banner"></div>
+    <div id="toggle-row">
+      <button class="toggle" id="btn-2d">2D</button>
+      <button class="toggle active" id="btn-3d">3D</button>
+    </div>
+    <div id="map"></div>
+  </div>
+</div>
+
+<script src="./vendor/pmtiles.js"></script>
+<script src="./vendor/maplibre-gl.js"></script>
+<script>
+"use strict";
+
+const params = new URLSearchParams(window.location.search);
+// По умолчанию — «первая точка» проекта (см. docs/plan.md, реальный прогон
+// конвейера в этой сессии): 58.049986, 56.342231. Можно переопределить
+// `?lon=&lat=&zoom=` для тестов/других участков.
+const initialLon = parseFloat(params.get("lon")) || 56.342231;
+const initialLat = parseFloat(params.get("lat")) || 58.049986;
+const initialZoom = parseFloat(params.get("zoom")) || 14;
+
+const pmtilesUrl = params.get("pmtiles") || "/citymap-data/city.pmtiles";
+const terrainUrlTemplate = params.get("terrain") || "/citymap-data/terrain/{z}/{x}/{y}.png";
+const jobsApiUrl = params.get("jobsApi") || "/jobs";
+
+const errorEl = document.getElementById("error-banner");
+const jobStatusEl = document.getElementById("job-status");
+const pickedPointEl = document.getElementById("picked-point");
+const buildBtn = document.getElementById("build-btn");
+const radiusInput = document.getElementById("radius");
+
+function showError(message) {
+  errorEl.textContent = message;
+  errorEl.style.display = "block";
+}
+
+// Регистрация протокола pmtiles:// у MapLibre GL (Шаг 2.12, п. 3) — сам
+// PMTiles-архив читается диапазонными (Range) HTTP-запросами напрямую из
+// браузера, отдельный тайл-сервер не нужен (см. docs/citymap.md).
+const pmtilesProtocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", pmtilesProtocol.tile);
+
+// Стили дорог по классу OpenMapTiles-схемы (Шаг 2.12, п. 3, критерий
+// «дороги — стили по классам»). Ширина/цвет — по типу, не по одному
+// правилу на все дороги.
+const ROAD_WIDTH = [
+  "interpolate", ["linear"], ["zoom"],
+  10, ["match", ["get", "class"],
+    ["motorway", "trunk"], 2,
+    ["primary", "secondary"], 1.4,
+    ["tertiary", "residential", "living_street"], 1,
+    0.6],
+  16, ["match", ["get", "class"],
+    ["motorway", "trunk"], 10,
+    ["primary", "secondary"], 7,
+    ["tertiary", "residential", "living_street"], 5,
+    2],
+];
+const ROAD_COLOR = ["match", ["get", "class"],
+  ["motorway", "trunk"], "#e8973a",
+  ["primary"], "#e0b23a",
+  ["secondary", "tertiary"], "#d8d060",
+  ["path", "footway", "pedestrian", "steps"], "#4a5568",
+  "#8a94a3"];
+
+const style = {
+  version: 8,
+  glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
+  sources: {
+    "city-vector": { type: "vector", url: `pmtiles://${pmtilesUrl}` },
+    "terrain-rgb": {
+      type: "raster-dem", tiles: [terrainUrlTemplate], tileSize: 256,
+      encoding: "mapbox", maxzoom: 14,
+    },
+  },
+  layers: [
+    { id: "background", type: "background", paint: { "background-color": "#14161a" } },
+    { id: "landcover", type: "fill", source: "city-vector", "source-layer": "landcover",
+      paint: { "fill-color": ["match", ["get", "class"], "wood", "#22432c", "grass", "#2d4a2f", "#26302a"] } },
+    { id: "water", type: "fill", source: "city-vector", "source-layer": "water",
+      paint: { "fill-color": "#1f3a52" } },
+    { id: "transportation", type: "line", source: "city-vector", "source-layer": "transportation",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ROAD_COLOR, "line-width": ROAD_WIDTH } },
+    { id: "building-2d", type: "fill", source: "city-vector", "source-layer": "building",
+      paint: { "fill-color": "#5a6472", "fill-opacity": 0.8 }, layout: { visibility: "none" } },
+    { id: "building-3d", type: "fill-extrusion", source: "city-vector", "source-layer": "building",
+      paint: {
+        "fill-extrusion-color": "#6b7688",
+        // render_height/render_min_height - реальные поля схемы OpenMapTiles
+        // (Planetiler, встроенный профиль) - высота по этажам/тегам OSM,
+        // не выдумана для этой карты.
+        "fill-extrusion-height": ["coalesce", ["get", "render_height"], 6],
+        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
+        "fill-extrusion-opacity": 0.85,
+      }, layout: { visibility: "visible" } },
+  ],
+};
+
+const map = new maplibregl.Map({
+  container: "map",
+  style,
+  center: [initialLon, initialLat],
+  zoom: initialZoom,
+  pitch: 45,
+  attributionControl: false,
+});
+map.addControl(new maplibregl.AttributionControl({
+  customAttribution: "© OpenMapTiles © OpenStreetMap contributors",
+}));
+map.addControl(new maplibregl.NavigationControl());
+
+map.on("error", (e) => {
+  const msg = (e && e.error && e.error.message) || String(e);
+  // Отсутствие city.pmtiles/terrain-тайлов в этом окружении - честно
+  // документированное ограничение (Шаг 2.12: реального городского покрытия
+  // без Geofabrik/Overpass здесь не собрать, см. docs/citymap.md), не
+  // ошибка страницы - не шумим баннером на каждый такой источник.
+  if (/city.pmtiles|terrain/i.test(msg)) return;
+  showError("Ошибка карты: " + msg);
+});
+
+const mapStatusEl = document.getElementById("map-status");
+map.on("load", () => {
+  map.setTerrain({ source: "terrain-rgb", exaggeration: 1.0 });
+  mapStatusEl.textContent = "Карта загружена";
+});
+map.on("idle", () => {
+  mapStatusEl.textContent = "Карта загружена";
+});
+
+// 2D/3D переключатель (Шаг 2.12, п. 3).
+const btn2d = document.getElementById("btn-2d");
+const btn3d = document.getElementById("btn-3d");
+function setMode(is3d) {
+  btn2d.classList.toggle("active", !is3d);
+  btn3d.classList.toggle("active", is3d);
+  map.setLayoutProperty("building-3d", "visibility", is3d ? "visible" : "none");
+  map.setLayoutProperty("building-2d", "visibility", is3d ? "none" : "visible");
+  map.easeTo({ pitch: is3d ? 45 : 0, duration: 400 });
+  map.setTerrain(is3d ? { source: "terrain-rgb", exaggeration: 1.0 } : null);
+}
+btn2d.addEventListener("click", () => setMode(false));
+btn3d.addEventListener("click", () => setMode(true));
+
+// Клик по объекту - всплывающее окно со свойствами (Шаг 2.12, п. 3).
+map.on("click", (e) => {
+  const features = map.queryRenderedFeatures(e.point, {
+    layers: ["building-3d", "building-2d", "transportation", "water"],
+  });
+  if (features.length === 0) return;
+  const f = features[0];
+  const rows = Object.entries(f.properties || {})
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `<tr><td style="color:#9aa4b2;padding-right:8px">${k}</td><td>${v}</td></tr>`)
+    .join("");
+  new maplibregl.Popup()
+    .setLngLat(e.lngLat)
+    .setHTML(`<table>${rows || "<tr><td>нет атрибутов</td></tr>"}</table>`)
+    .addTo(map);
+});
+
+// Выбор точки участка + постановка задачи в /jobs (Шаг 2.12, п. 4).
+let pickedLon = null;
+let pickedLat = null;
+
+map.on("contextmenu", (e) => {
+  e.preventDefault();
+  pickedLon = e.lngLat.lng;
+  pickedLat = e.lngLat.lat;
+  pickedPointEl.textContent = `${pickedLat.toFixed(6)}, ${pickedLon.toFixed(6)}`;
+  buildBtn.disabled = false;
+  if (window._pickMarker) window._pickMarker.remove();
+  window._pickMarker = new maplibregl.Marker({ color: "#7fb2ff" }).setLngLat(e.lngLat).addTo(map);
+});
+pickedPointEl.title = "Правый клик по карте — выбрать точку участка";
+
+async function pollJob(jobId) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const resp = await fetch(`${jobsApiUrl}/${jobId}`);
+    if (!resp.ok) {
+      jobStatusEl.textContent = `Задача ${jobId}: ошибка запроса статуса`;
+      return;
+    }
+    const job = await resp.json();
+    if (job.status === "done") {
+      const filesResp = await fetch(`/models/${jobId}/files`);
+      const files = filesResp.ok ? await filesResp.json() : { files: [] };
+      const viewerFile = files.files.find((f) => f.viewer_url);
+      jobStatusEl.innerHTML = viewerFile
+        ? `Задача ${jobId}: готово. <a href="${viewerFile.viewer_url}" target="_blank">Открыть модель</a>`
+        : `Задача ${jobId}: готово.`;
+      return;
+    }
+    if (job.status === "failed") {
+      jobStatusEl.textContent = `Задача ${jobId}: ошибка — ${job.error_message || "неизвестно"}`;
+      return;
+    }
+    jobStatusEl.textContent = `Задача ${jobId}: ${job.status}…`;
+  }
+}
+
+buildBtn.addEventListener("click", async () => {
+  if (pickedLon === null) return;
+  const radius = Math.min(3000, Math.max(500, parseFloat(radiusInput.value) || 500));
+  buildBtn.disabled = true;
+  jobStatusEl.textContent = "Постановка задачи…";
+  try {
+    const resp = await fetch(jobsApiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        center: { lon: pickedLon, lat: pickedLat },
+        radius_m: radius,
+        layers: [],
+        detail: "LOD1",
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      jobStatusEl.textContent = `Ошибка постановки задачи: ${resp.status} ${body}`;
+      buildBtn.disabled = false;
+      return;
+    }
+    const created = await resp.json();
+    jobStatusEl.textContent = `Задача ${created.id}: ${created.status}…`;
+    pollJob(created.id).finally(() => { buildBtn.disabled = false; });
+  } catch (err) {
+    jobStatusEl.textContent = "Ошибка сети: " + err.message;
+    buildBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

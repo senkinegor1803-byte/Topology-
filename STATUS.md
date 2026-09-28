@@ -500,3 +500,60 @@ start`), затем реально выполнялся ~15 мин и получ
   тайлов при отдалении камеры; реальная проверка частоты кадров на целевом
   оборудовании («≥30 кадров/с») — недоступна AI-сессии без реального
   устройства/GPU. Подробности — `docs/streaming-viewer.md`.
+
+- Шаг 2.12 (публичная карта города) — Planetiler → PMTiles (п. 1):
+  скрипт-обёртка `geo/scripts/build_citymap_vector_tiles.sh` над встроенным
+  профилем OpenMapTiles Planetiler'а (свой Java-профиль не написан —
+  критерий шага уже закрыт готовыми слоями схемы: здания/дороги/вода/
+  зелень). Реально, не имитационно, проверен весь путь: настоящий
+  `first_point.osm` (2.1 МБ, живой `GET api.openstreetmap.org/api/0.6/map`
+  по bbox «первой точки») → `.osm.pbf` (`osmium cat`, т.к. Planetiler не
+  читает XML напрямую) → PMTiles — 92 КБ, 4377 объектов, слои `building`
+  (7.5k)/`housenumber` (5.8k)/`poi` (4.5k)/`landcover`/`place`/
+  `transportation`/`water`, дважды воспроизведено (вручную и самим
+  скриптом) с одинаковым результатом; файл зафиксирован тестовой фикстурой
+  (`tests/fixtures/citymap/perm_demo.pmtiles`). Terrain-RGB (п. 2):
+  `citymap/terrain_rgb.py` — стандартная кодировка Mapbox Terrain-RGB (шаг
+  0.1 м, честный `np.clip` вместо молчаливого переполнения) + XYZ-тайлинг
+  в Web Mercator по стандартным формулам слайпи-карт, без новой зависимости
+  (`rasterio` вместо `mercantile`); CLI (`citymap/cli.py`) реально проверен
+  на настоящем SRTM30m-растре «первой точки» (2209 точек, диапазон
+  94–162 м) — декодированная высота из построенного тайла совпала с
+  исходным замером. MapLibre GL (п. 3, 5, 6, `web/citymap/index.html`):
+  поднятые здания (`fill-extrusion` по настоящим `render_height`/
+  `render_min_height` схемы OpenMapTiles, не выдуманным полям), дороги по
+  классам (`class`-выражение на цвет/ширину), вода/зелень отдельными
+  цветами, 2D/3D-переключатель (видимость слоёв + `pitch` + `setTerrain`),
+  клик-карточка объекта (`queryRenderedFeatures`), кнопка «Построить
+  модель участка здесь» → тот же `POST /jobs` сервиса 2 (Шаг 1.3, без
+  отдельного API) с опросом статуса и ссылкой на готовый результат,
+  видимые подписи источников/лицензий (тот же текст, что печатает
+  Planetiler: «© OpenMapTiles © OpenStreetMap contributors»). MapLibre GL
+  JS/PMTiles вендорены (`web/citymap/vendor/`) с настоящими лицензиями
+  (BSD-3-Clause); архив читается прямо из браузера Range-запросами через
+  `pmtiles://`-протокол — без отдельного тайл-сервера, поддержка `206
+  Partial Content` у `StaticFiles`/`FileResponse` (Starlette) реально
+  проверена. `api/app.py`: `/citymap` (статика страницы, тот же приём, что
+  `/viewer` Шага 1.9) + `/citymap-data` (общегородские PMTiles/terrain-RGB,
+  путь через `CITYMAP_DATA_DIR`, аналог `TOPOLOGY_STORAGE_ROOT`) — без
+  переменной каталог честно не монтируется (404, не падение при старте).
+  Оба критерия шага реально проверены: «≤3 с» — headless
+  Chromium/Playwright, момент готовности карты (`test_citymap_browser.
+  py::test_citymap_loads_within_three_seconds`); «выдерживает 50
+  одновременных пользователей» — настоящий `uvicorn` на TCP-сокете (не
+  in-process ASGI-транспорт), 50 потоков одновременно шлют Range-запросы к
+  `city.pmtiles` (`test_citymap_api.py::test_citymap_data_withstands_50_
+  concurrent_range_clients`). +19 тестов (`test_citymap_terrain_rgb.py` —
+  9, `test_citymap_cli.py` — 2, `test_citymap_api.py` — 4, `test_citymap_
+  browser.py` — 4 в настоящем headless Chromium). Не реализовано, честно:
+  автоматическая еженедельная пересборка PMTiles всего города (сетевая
+  политика этой среды блокирует и Overpass — все три независимых зеркала
+  одинаково, `ws_closed_mid_exchange` — и `download.geofabrik.de`, сброс
+  соединения; сам скрипт при этом не привязан к источнику и отработает там,
+  где сеть есть); реальное городское покрытие PMTiles/terrain-RGB (только
+  демо-участок ~1 км² вокруг «первой точки»); слой ЛЭП (нет в стандартной
+  схеме OpenMapTiles/встроенном профиле Planetiler — не пропуск при
+  стилизации, а ограничение самой схемы); слои ограничений/кадастра
+  (данные Этапа 3 ещё не существуют); источник terrain-RGB — TessaDEM
+  конкретно (использован реально доступный `api.opentopodata.org`/SRTM30m,
+  CLI источник-агностичен). Подробности — `docs/citymap.md`.

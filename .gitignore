@@ -16,6 +16,7 @@ node_modules/
 
 # Data & generated artifacts (large binary, not for git)
 /data/
+/geo/data/
 /geo/tests/output/
 *.gpkg
 *.tif

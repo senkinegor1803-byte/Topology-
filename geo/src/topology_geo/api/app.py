@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,6 +34,7 @@ from topology_geo.jobs.steps import DEFAULT_STEP_NAMES
 from topology_geo.tasks.pipeline_tasks import enqueue_job, get_storage
 
 VIEWER_DIR = Path(__file__).resolve().parents[1] / "web" / "viewer"
+CITYMAP_DIR = Path(__file__).resolve().parents[1] / "web" / "citymap"
 
 
 def _connect() -> psycopg.Connection:
@@ -60,6 +62,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Топология: API конвейера", version="0.1.0", lifespan=lifespan)
 app.mount("/viewer", StaticFiles(directory=VIEWER_DIR), name="viewer")
+app.mount("/citymap", StaticFiles(directory=CITYMAP_DIR), name="citymap")
+
+# Данные карты города (city.pmtiles + пирамида terrain-RGB) — общегородские
+# артефакты, не привязанные к конкретной задаче (в отличие от /models/*), их
+# путь настраивается `CITYMAP_DATA_DIR` (тот же приём, что `TOPOLOGY_STORAGE_
+# ROOT` у `tasks.pipeline_tasks.get_storage`) — реальная городская выгрузка
+# в этой среде не строится (см. docs/citymap.md: сетевая политика песочницы
+# блокирует Geofabrik/Overpass), поэтому по умолчанию каталог не примонтирован
+# и `/citymap-data/*` отдаёт 404, а не падает на старте.
+_citymap_data_root = os.environ.get("CITYMAP_DATA_DIR")
+if _citymap_data_root and Path(_citymap_data_root).is_dir():
+    app.mount("/citymap-data", StaticFiles(directory=_citymap_data_root), name="citymap-data")
 
 
 def _download_url(job_id: uuid.UUID, storage_key: str) -> str:
