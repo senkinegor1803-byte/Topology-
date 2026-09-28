@@ -31,9 +31,7 @@ flowchart LR
         T18["§2.19 Выходные форматы: федеративные IFC-слои, LandXML/CityJSON/DXF, meta.json<br/>export/*.py, jobs/steps.py"]:::done
         T19["§2.20 3D Tiles: иерархия LOD по кольцам, потоковая загрузка<br/>tiling/{gltf_mesh,tile_content,tileset}.py"]:::done
         T20["§2.21 Карта города: тайлы Web Mercator, terrain-RGB<br/>citymap/{terrain_rgb,cli}.py"]:::done
-    end
-    subgraph Заготовка
-        T5["§2.6 Огибающая застройки"]:::todo
+        T5["§2.6 Огибающая застройки<br/>constraints/envelope.py"]:::done
     end
 
     C1 --> R1
@@ -338,16 +336,27 @@ Overture Buildings в этой среде нет (не настроено сет
 подключение к его хранилищу), водопад падает на дефолт по типу; подключение
 реального источника не потребует изменений в `compute_height_m`.
 
-### 2.6 Огибающая допустимой застройки (Шаг 3.3) — заготовка
+### 2.6 Огибающая допустимой застройки (Шаг 3.3) — реализовано (частично)
 
-Булева/геометрическая модель, формализуется при реализации Этапа 3:
+Код: `geo/src/topology_geo/constraints/envelope.py`. Тесты:
+`test_constraints_envelope.py` (12). Подробности — `docs/constraints.md`.
 
 ```
 envelope = (parcel ⊖ setbacks) \ (⋃ protection_zones ∪ ⋃ forbidden_zones)
-height_limit = min(height_limit_pzz, height_limit_airport, height_limit_okn)
+height_limit = min(height_limit_pzz, height_limit_airport, height_limit_okn, ...)
 ```
 
-где `⊖` — эрозия полигона на величину отступа, `\` — разность множеств.
+где `⊖` — эрозия полигона на величину отступа (`shapely.buffer(-setback_m)`),
+`\` — разность множеств (`.difference(...)` по каждой запретной зоне
+последовательно). `height_limit` — честно МИНИМУМ по ВСЕМ источникам с
+известной предельной высотой (не только трём названным в исходной
+заготовке — любая переданная `HeightLimitedZone` с `max_height_m`
+участвует), источник минимума фиксируется в `height_limit_source` —
+проверено тестом, что при равных условиях побеждает МЕНЬШАЯ высота, а не
+первая по порядку.
+
+Не реализовано (честно): экструзия огибающей в IFC-меш/вьюер — подробности
+`docs/constraints.md`.
 
 ### 2.7 Дороги, вода, рельсы, деревья (Шаг 1.7) — реализовано
 
