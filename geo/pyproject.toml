@@ -27,6 +27,7 @@ dependencies = [
     "mapbox-earcut>=1.0",
     "pygltflib>=1.16",
     "ezdxf>=1.0",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

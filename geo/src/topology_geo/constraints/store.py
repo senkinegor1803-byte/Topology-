@@ -197,6 +197,62 @@ def find_zones(
     return [_row_to_zone(r) for r in rows]
 
 
+def find_zones_near_point(
+    conn: _Connection, lon: float, lat: float, *, max_distance_m: float = 500.0,
+) -> list[tuple[ConstraintZone, float]]:
+    """Текущие зоны в пределах `max_distance_m` от точки, с реальным
+    метрическим расстоянием (`::geography`, не градусы) — Шаг 3.5, п. 2:
+    «клик по точке → зоны, ближайшие сети с расстояниями». Отсортировано
+    по возрастанию расстояния (ближайшая зона первой)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, zone_type, status, regime, registry_number, document_basis, "
+            "source_name, data_timestamp, version, superseded_at, ST_AsGeoJSON(geom), "
+            "ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS dist_m "
+            "FROM constraint_zones "
+            "WHERE superseded_at IS NULL "
+            "AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s) "
+            "ORDER BY dist_m",
+            (lon, lat, lon, lat, max_distance_m),
+        )
+        rows = cur.fetchall()
+    return [(_row_to_zone(r[:-1]), float(r[-1])) for r in rows]
+
+
+def search_zones(
+    conn: _Connection, *, zone_type: str | None = None, status: str | None = None,
+    registry_number_contains: str | None = None,
+) -> list[ConstraintZone]:
+    """Фильтр/поиск по текущим зонам (Шаг 3.5, п. 3: «фильтры и поиск... по
+    типу... выгрузка результата в Excel»). По напряжению/диаметру НЕ
+    фильтрует, честно — оба параметра относятся к конкретным объектам
+    (ЛЭП/сети), а не к обобщённой зоне ограничения этой таблицы; `regime`
+    хранит их как свободный текст, не структурированное число, отдельный
+    столбец под них не заводился в Шаге 3.1 (не было для этого причины на
+    тот момент) - см. `docs/point-query.md`."""
+    clauses = ["superseded_at IS NULL"]
+    params: list[object] = []
+    if zone_type is not None:
+        clauses.append("zone_type = %s")
+        params.append(zone_type)
+    if status is not None:
+        clauses.append("status = %s")
+        params.append(status)
+    if registry_number_contains is not None:
+        clauses.append("registry_number ILIKE %s")
+        params.append(f"%{registry_number_contains}%")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, zone_type, status, regime, registry_number, document_basis, "
+            "source_name, data_timestamp, version, superseded_at, ST_AsGeoJSON(geom) "
+            f"FROM constraint_zones WHERE {' AND '.join(clauses)} ORDER BY id",
+            params,
+        )
+        rows = cur.fetchall()
+    return [_row_to_zone(r) for r in rows]
+
+
 def zone_history(conn: _Connection, registry_number: str) -> list[ConstraintZone]:
     """Все версии зоны с данным реестровым номером, от новой к старой
     (Шаг 3.1, п. 4 — проверить, что история версий действительно хранится,
