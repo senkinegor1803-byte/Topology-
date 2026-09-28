@@ -70,6 +70,14 @@ def _viewer_url(job_id: uuid.UUID, download_url: str) -> str:
     return f"/viewer/index.html?model={quote(download_url, safe='')}&job={job_id}"
 
 
+def _tileset_viewer_url(job_id: uuid.UUID, download_url: str) -> str:
+    """Шаг 2.11, п. 2-3: потоковый режим вьюера — `?tileset=` вместо
+    `?model=`; `job` нужен вьюеру, чтобы строить URL отдельных тайлов через
+    тот же `/models/{job}/download?key=...`, не полагаясь на структуру
+    Storage-ключей (см. `web/viewer/index.html`)."""
+    return f"/viewer/index.html?tileset={quote(download_url, safe='')}&job={job_id}"
+
+
 def _job_to_out(job: store.Job) -> JobOut:
     return JobOut(
         id=job.id,
@@ -121,7 +129,11 @@ def get_job(job_id: uuid.UUID, conn=Depends(get_connection)) -> JobOut:
 
 def _file_out(job_id: uuid.UUID, step_name: str, storage_key: str) -> FileOut:
     download_url = _download_url(job_id, storage_key)
-    viewer_url = _viewer_url(job_id, download_url) if storage_key.endswith(".glb") else None
+    viewer_url = None
+    if storage_key.endswith(".glb"):
+        viewer_url = _viewer_url(job_id, download_url)
+    elif storage_key.endswith("tileset.json"):
+        viewer_url = _tileset_viewer_url(job_id, download_url)
     return FileOut(step_name=step_name, storage_key=storage_key, download_url=download_url, viewer_url=viewer_url)
 
 

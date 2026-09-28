@@ -1,14 +1,15 @@
 """Реализация шагов пайплайна задачи (Шаг 1.3).
 
 `select_osm`, `prepare_relief`, `select_and_normalize`, `assemble_ifc`,
-`convert_to_glb` и `package_outputs` — реальные шаги, использующие уже
-реализованные Шаги 1.1, 1.2, 1.4-1.9, 2.10.
+`convert_to_glb`, `generate_tileset` и `package_outputs` — реальные шаги,
+использующие уже реализованные Шаги 1.1, 1.2, 1.4-1.9, 2.1, 2.10, 2.11.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import math
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -64,10 +65,22 @@ from topology_geo.relief.cog import to_cog
 from topology_geo.relief.coverage import find_coverage
 from topology_geo.relief.coverage import ensure_schema as ensure_dem_coverage_schema
 from topology_geo.relief.service import Grid, get_dem, read_relief_from_storage
-from topology_geo.relief.tin import build_site_tin
+from topology_geo.relief.tin import build_site_tin, sample_bilinear
 from topology_geo.selection.geopackage import dataset_to_geopackage_bytes
 from topology_geo.selection.service import select_site_data
 from topology_geo.storage import ObjectStorage
+from topology_geo.tiling.grid import (
+    LOD0,
+    LOD0_MAX_M,
+    LOD1,
+    LOD2,
+    TileIndex,
+    classify_lod_ring,
+    tiles_covering_circle,
+    world_to_tile_index,
+)
+from topology_geo.tiling.tile_content import build_tile_content
+from topology_geo.tiling.tileset import TileContentEntry, build_tileset_json
 
 RELIEF_PIXEL_SIZE_M = 1.0
 RELIEF_MARGIN_M = 200.0
@@ -460,6 +473,88 @@ def convert_to_glb(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     return {"storage_key": key, "size_bytes": len(glb_bytes)}
 
 
+def generate_tileset(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
+    """Шаг 2.11, п. 1: 3D Tiles (`tileset.json` + GLB по тайлам 250×250 м,
+    Шаг 2.1) с иерархией детализации по кольцам LOD (Шаг 2.1, п. 1:
+    `classify_lod_ring`) — для потокового вьюера (п. 2-3, `docs/streaming-
+    viewer.md`): рельеф тайла грубее с расстоянием (`tiling.tileset.
+    RING_BACKGROUND_STEP_M`), здания — без крыши/блоком/с крышей по кольцу
+    (та же меш-логика, что CityJSON, Шаг 2.10, `tiling.tile_content`).
+
+    Лёгкий шаг: НЕ строит общий TIN участка (самая тяжёлая по памяти часть
+    `assemble_ifc`) — рельеф тайла берётся напрямую из уже сохранённого
+    растра (`prepare_relief`, тот же приём, что параллельный генератор
+    тайлов Шага 2.1, `tasks.tile_tasks`), высота площадки здания — билинейно
+    прямо из растра (`relief.tin.sample_bilinear`), не через `SiteTin.
+    interpolate_z`.
+
+    Честно не входит в этот проход: дороги/вода/рельсы/растительность/ЛЭП в
+    тайлах (только рельеф и здания); выгрузка тайлов за пределы актуальных в
+    кэше (Шаг 2.1) не переиспользуется — каждый вызов строит тайлы заново
+    (кэш `tiling.cache` используется только параллельным генератором тайлов
+    рельефа Шага 2.1, здесь не подключён, см. `docs/streaming-viewer.md`)."""
+    zone = pick_msk59_zone(job.center_lon)
+    center_x, center_y, _ = wgs84_to_msk59(job.center_lon, job.center_lat, zone=zone)
+
+    try:
+        dataset = select_site_data(conn, job.center_lon, job.center_lat, job.radius_m)
+    except Exception as exc:
+        raise RuntimeError(
+            "нет данных OSM для этой области (проверьте, что выполнен импорт по Шагу 1.1)"
+        ) from exc
+
+    relief_values, relief_grid = read_relief_from_storage(storage, f"jobs/{job.id}/relief.tif")
+
+    buildings = extrude_buildings(
+        dataset.features,
+        lambda x, y: sample_bilinear(relief_values, relief_grid, center_x + x, center_y + y),
+        NullOvertureSource(),
+    )
+
+    buildings_by_tile: dict[TileIndex, list] = {}
+    for building in buildings:
+        centroid = building.footprint.centroid
+        tile = world_to_tile_index(zone, center_x + centroid.x, center_y + centroid.y)
+        buildings_by_tile.setdefault(tile, []).append(building)
+
+    entries: list[TileContentEntry] = []
+    tile_counts = {LOD2: 0, LOD1: 0, LOD0: 0}
+    for tile in tiles_covering_circle(zone, center_x, center_y, job.radius_m):
+        minx, miny, maxx, maxy = tile.bounds()
+        tile_center_x, tile_center_y = (minx + maxx) / 2, (miny + maxy) / 2
+        distance = math.hypot(tile_center_x - center_x, tile_center_y - center_y)
+        if distance > LOD0_MAX_M:
+            continue  # угол тайла зацепил круг задачи, но центр тайла уже вне зоны Этапа 2
+        lod = classify_lod_ring(distance)
+
+        content = build_tile_content(
+            relief_values, relief_grid, tile, lod, buildings_by_tile.get(tile, []),
+            center_x=center_x, center_y=center_y,
+        )
+        if content is None:
+            continue
+
+        tile_key = f"jobs/{job.id}/tiles/{lod}/{tile.zone}_{tile.tx}_{tile.ty}.glb"
+        storage.upload(tile_key, content.glb_bytes, content_type="model/gltf-binary")
+        entries.append(
+            TileContentEntry(
+                tile=tile, lod=lod, storage_key=tile_key,
+                local_minx=minx - center_x, local_miny=miny - center_y,
+                local_maxx=maxx - center_x, local_maxy=maxy - center_y,
+                z_min=content.z_min, z_max=content.z_max,
+            )
+        )
+        tile_counts[lod] += 1
+
+    tileset_doc = build_tileset_json(entries)
+    tileset_key = f"jobs/{job.id}/tileset.json"
+    storage.upload(
+        tileset_key, json.dumps(tileset_doc, ensure_ascii=False).encode("utf-8"), content_type="application/json"
+    )
+
+    return {"tileset_storage_key": tileset_key, "tile_count": len(entries), "tiles_by_lod": tile_counts}
+
+
 # Слои пакета (Шаг 2.10, п. 3, `layers` в `meta.json`) - "networks"/
 # "constraints" (Этап 3, Шаги 3.1/3.4) сюда не входят, их ещё нет.
 # "status" - ни один слой не официальные регуляторные данные (те появятся
@@ -603,6 +698,7 @@ DEFAULT_PIPELINE: dict[str, Any] = {
     "select_and_normalize": select_and_normalize,
     "assemble_ifc": assemble_ifc,
     "convert_to_glb": convert_to_glb,
+    "generate_tileset": generate_tileset,
     "package_outputs": package_outputs,
 }
 

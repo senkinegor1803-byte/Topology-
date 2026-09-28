@@ -73,6 +73,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const params = new URLSearchParams(window.location.search);
 const modelUrl = params.get("model");
+const tilesetUrl = params.get("tileset");
+const jobId = params.get("job");
 const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("error-banner");
 const treeRootEl = document.getElementById("tree-root");
@@ -83,8 +85,8 @@ function showError(message) {
   errorEl.style.display = "block";
 }
 
-if (!modelUrl) {
-  showError("Не указан параметр ?model=<ссылка на .glb> — открыть модель нечем.");
+if (!modelUrl && !tilesetUrl) {
+  showError("Не указан параметр ?model=<ссылка на .glb> или ?tileset=<ссылка на tileset.json> — открыть нечем.");
   treeRootEl.innerHTML = "";
 }
 
@@ -257,6 +259,125 @@ if (modelUrl) {
       statusEl.textContent = "";
     }
   );
+} else if (tilesetUrl) {
+  loadTileset(tilesetUrl, jobId).catch((error) => {
+    showError("Не удалось загрузить тайлы: " + (error && error.message ? error.message : error));
+    statusEl.textContent = "";
+  });
+}
+
+// Потоковый вьюер (Шаг 2.11): плоский список тайлов 3D Tiles (`tileset.json`,
+// `tiling.tileset`, Шаг 2.11, п. 1) — без вложенной REPLACE-иерархии (см.
+// докстринг `tiling/tileset.py`), поэтому «по мере приближения» здесь не
+// полный расчёт screen-space error по спецификации 3D Tiles (этот вьюер не
+// Cesium), а простое правило: чем БЛИЖЕ камера к ЦЕНТРУ УЧАСТКА, тем более
+// детальные кольца (LOD1, затем LOD2) догружаются поверх всегда видимого
+// LOD0 (Шаг 2.1, п. 1 — те же границы колец 500/1500/3000 м). Проверка —
+// раз в 500 мс (`setInterval`), не на каждый кадр (fetch не бесплатный).
+// Выгрузка тайлов при отдалении камеры НЕ реализована (честно, простая
+// первая версия) — см. `docs/streaming-viewer.md`.
+async function loadTileset(url, job) {
+  const startedAt = performance.now();
+  statusEl.textContent = "Загрузка тайлов…";
+
+  const tileset = await (await fetch(url)).json();
+  const children = (tileset.root && tileset.root.children) || [];
+
+  const tileRoot = new THREE.Group();
+  tileRoot.name = "Участок (тайлы)";
+  scene.add(tileRoot);
+  modelRoot = tileRoot;
+
+  const loader = new GLTFLoader();
+  const categoryGroups = new Map(); // общие узлы-папки поверх ВСЕХ загруженных тайлов
+  const siteOrigin = new THREE.Vector3(0, 0, 0); // локальные координаты, центр участка
+
+  function categoryGroup(name) {
+    let group = categoryGroups.get(name);
+    if (!group) {
+      group = new THREE.Group();
+      group.name = name;
+      tileRoot.add(group);
+      categoryGroups.set(name, group);
+    }
+    return group;
+  }
+
+  function mergeTileIntoCategories(gltfScene) {
+    // Меш тайла - один корневой узел "Тайл" с узлами-категориями внутри
+    // (`tiling.gltf_mesh.build_glb`); переносим категории в ОБЩИЕ узлы
+    // ("Рельеф"/"Здания" со всех тайлов вместе), а не оставляем дерево
+    // раздробленным по тайлам - для панели слоёв (Шаг 1.9, п. 2) это один
+    // переключаемый слой на всю модель, как и в режиме ?model=.
+    const tileWrapper = gltfScene.children[0];
+    if (!tileWrapper) return;
+    for (const category of [...tileWrapper.children]) {
+      categoryGroup(category.name).add(...category.children);
+    }
+  }
+
+  function rebuildTree() {
+    buildTree({ children: Array.from(categoryGroups.values()) });
+  }
+
+  const RING_LOAD_DISTANCE_M = { LOD0: 3400, LOD1: 1800, LOD2: 800 };
+  const tiles = children.map((child) => ({
+    child,
+    center: new THREE.Vector3(...child.boundingVolume.box.slice(0, 3)),
+    loaded: false,
+    loading: false,
+  }));
+
+  function loadTile(state) {
+    state.loading = true;
+    const uri = state.child.content.uri;
+    const tileUrl = `${url.split("?")[0]}?key=${encodeURIComponent(uri)}`;
+    return new Promise((resolve) => {
+      loader.load(
+        tileUrl,
+        (gltf) => {
+          gltf.scene.traverse((obj) => {
+            if (obj.isMesh) obj.geometry.computeVertexNormals();
+          });
+          mergeTileIntoCategories(gltf.scene);
+          state.loaded = true;
+          state.loading = false;
+          rebuildTree();
+          resolve();
+        },
+        undefined,
+        () => {
+          state.loading = false;
+          resolve();
+        }
+      );
+    });
+  }
+
+  function dueTiles() {
+    const distToSite = camera.position.distanceTo(siteOrigin);
+    return tiles.filter((state) => {
+      if (state.loaded || state.loading) return false;
+      const lod = state.child.extras && state.child.extras.lod;
+      return distToSite < (RING_LOAD_DISTANCE_M[lod] ?? RING_LOAD_DISTANCE_M.LOD0);
+    });
+  }
+
+  const firstBatch = dueTiles();
+  await Promise.all(firstBatch.map(loadTile));
+
+  if (tileRoot.children.length > 0) frameCameraOnObject(tileRoot);
+  const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+  statusEl.textContent = `Загружено ${firstBatch.length} из ${tiles.length} тайлов за ${seconds} с`;
+
+  setInterval(() => {
+    const due = dueTiles();
+    if (due.length === 0) return;
+    Promise.all(due.map(loadTile)).then(() => {
+      const loaded = tiles.filter((t) => t.loaded).length;
+      statusEl.textContent = `Загружено ${loaded} из ${tiles.length} тайлов`;
+    });
+  }, 500);
 }
 </script>
 </body>

@@ -210,6 +210,8 @@ def test_full_happy_path_creates_downloadable_files(pg_test_db, tmp_path, monkey
             # Форматы, не зависящие от IFC-схемы (Шаг 2.10, п. 2)
             "assemble_ifc:landxml", "assemble_ifc:cityjson", "assemble_ifc:dxf",
             "convert_to_glb",
+            # 3D Tiles потокового вьюера (Шаг 2.11, п. 1)
+            "generate_tileset:tileset",
             # meta.json + zip-архив (Шаг 2.10, п. 3)
             "package_outputs:meta", "package_outputs:archive",
         }
@@ -217,8 +219,13 @@ def test_full_happy_path_creates_downloadable_files(pg_test_db, tmp_path, monkey
         glb_file = next(f for f in files if f["step_name"] == "convert_to_glb")
         assert glb_file["viewer_url"] is not None
         assert glb_file["viewer_url"].startswith("/viewer/index.html?model=")
+
+        tileset_file = next(f for f in files if f["step_name"] == "generate_tileset:tileset")
+        assert tileset_file["viewer_url"] is not None
+        assert tileset_file["viewer_url"].startswith("/viewer/index.html?tileset=")
+
         for f in files:
-            assert f["viewer_url"] is None or f["step_name"] == "convert_to_glb"
+            assert f["viewer_url"] is None or f["step_name"] in ("convert_to_glb", "generate_tileset:tileset")
 
         download_resp = client.get(glb_file["download_url"])
         assert download_resp.status_code == 200
