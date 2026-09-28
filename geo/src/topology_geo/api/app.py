@@ -136,6 +136,14 @@ def get_job_files(job_id: uuid.UUID, conn=Depends(get_connection)) -> FilesRespo
             continue
         if "storage_key" in s.result:
             files.append(_file_out(job.id, s.step_name, s.result["storage_key"]))
+        # Форматы, не зависящие от IFC-схемы (Шаг 2.10, п. 2: LandXML/
+        # CityJSON/DXF) - строятся в `assemble_ifc` ОДИН раз, их ключи лежат
+        # прямо в `s.result`, не под `schemas[schema_name]` - тот же приём
+        # раскрытия `*_storage_key`, что и ниже для схемных ключей.
+        for key, value in s.result.items():
+            if key != "storage_key" and key.endswith("_storage_key"):
+                prefix = key.removesuffix("_storage_key")
+                files.append(_file_out(job.id, f"{s.step_name}:{prefix}", value))
         for schema_name, schema_result in s.result.get("schemas", {}).items():
             if "storage_key" in schema_result:
                 files.append(_file_out(job.id, f"{s.step_name}:{schema_name}", schema_result["storage_key"]))

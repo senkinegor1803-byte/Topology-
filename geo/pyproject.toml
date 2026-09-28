@@ -26,6 +26,7 @@ dependencies = [
     "pyogrio>=0.9",
     "mapbox-earcut>=1.0",
     "pygltflib>=1.16",
+    "ezdxf>=1.0",
 ]
 
 [project.optional-dependencies]

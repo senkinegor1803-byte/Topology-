@@ -204,7 +204,14 @@ def test_full_happy_path_creates_downloadable_files(pg_test_db, tmp_path, monkey
             # Каркасная/внутриквартальная сеть отдельными файлами (Шаг 2.4, п. 4)
             "assemble_ifc:IFC4:roads_backbone", "assemble_ifc:IFC4:roads_internal",
             "assemble_ifc:IFC4X3:roads_backbone", "assemble_ifc:IFC4X3:roads_internal",
+            # Федеративные слои (Шаг 2.10, п. 1)
+            "assemble_ifc:IFC4:relief", "assemble_ifc:IFC4:buildings", "assemble_ifc:IFC4:power",
+            "assemble_ifc:IFC4X3:relief", "assemble_ifc:IFC4X3:buildings", "assemble_ifc:IFC4X3:power",
+            # Форматы, не зависящие от IFC-схемы (Шаг 2.10, п. 2)
+            "assemble_ifc:landxml", "assemble_ifc:cityjson", "assemble_ifc:dxf",
             "convert_to_glb",
+            # meta.json + zip-архив (Шаг 2.10, п. 3)
+            "package_outputs:meta", "package_outputs:archive",
         }
 
         glb_file = next(f for f in files if f["step_name"] == "convert_to_glb")

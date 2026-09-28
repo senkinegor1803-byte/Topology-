@@ -1,14 +1,17 @@
 """Реализация шагов пайплайна задачи (Шаг 1.3).
 
-`select_osm`, `prepare_relief`, `select_and_normalize`, `assemble_ifc` и
-`convert_to_glb` — реальные шаги, использующие уже реализованные Шаги
-1.1, 1.2, 1.4-1.9.
+`select_osm`, `prepare_relief`, `select_and_normalize`, `assemble_ifc`,
+`convert_to_glb` и `package_outputs` — реальные шаги, использующие уже
+реализованные Шаги 1.1, 1.2, 1.4-1.9, 2.10.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +19,11 @@ import ifcopenshell
 import numpy as np
 from affine import Affine
 
+from topology_geo import __version__
 from topology_geo.coords import MSK59_ZONES, pick_msk59_zone, wgs84_to_msk59
+from topology_geo.export.cityjson import build_cityjson
+from topology_geo.export.dxf import build_dxf
+from topology_geo.export.landxml import build_landxml
 from topology_geo.geometry.bridges import build_bridge_ribbons
 from topology_geo.geometry.buildings import NullOvertureSource, extrude_buildings
 from topology_geo.geometry.landscaping import build_benches, build_fences, build_streetlamps
@@ -49,9 +56,13 @@ from topology_geo.ifc.registry import ensure_schema as ensure_ifc_registry_schem
 from topology_geo.ifc.registry import register_global_ids
 from topology_geo.ifc.to_glb import convert_ifc_to_glb
 from topology_geo.jobs import store
+from topology_geo.osm.import_log import all_latest_sources
+from topology_geo.osm.import_log import ensure_schema as ensure_import_log_schema
 from topology_geo.osm.queries import count_within_radius
 from topology_geo.osm.raw_roads import fetch_raw_roads_in_buffer
 from topology_geo.relief.cog import to_cog
+from topology_geo.relief.coverage import find_coverage
+from topology_geo.relief.coverage import ensure_schema as ensure_dem_coverage_schema
 from topology_geo.relief.service import Grid, get_dem, read_relief_from_storage
 from topology_geo.relief.tin import build_site_tin
 from topology_geo.selection.geopackage import dataset_to_geopackage_bytes
@@ -206,7 +217,16 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
 
     Мосты (Шаг 2.5, п. 1-3, `geometry.bridges.build_bridge_ribbons`) строятся
     ПОСЛЕ `roads`/`rail` — габарит проверяется по их осям (`RoadRibbon.axis`/
-    `RailRibbon.axis`)."""
+    `RailRibbon.axis`).
+
+    Выходные форматы (Шаг 2.10): на каждую IFC-схему — три федеративных
+    файла по слоям (п. 1, `relief_*.ifc`/`buildings_*.ifc`/`power_*.ifc`,
+    тот же приём, что `roads_backbone/internal`, Шаг 2.4, п. 4), плюс ОДИН
+    раз (не зависят от IFC-схемы) — LandXML (`topology_geo.export.landxml`:
+    поверхность TIN + оси дорог/путей), CityJSON (`export.cityjson`: здания
+    LOD0/LOD1/LOD2, та же логика меша, что и IFC-рендер зданий выше) и DXF
+    (`export.dxf`: 2D-контуры зданий/дорог/воды по слоям). Подробности и
+    упрощения каждого формата — `docs/output-formats.md`."""
     zone = pick_msk59_zone(job.center_lon)
     center_x, center_y, _ = wgs84_to_msk59(job.center_lon, job.center_lat, zone=zone)
 
@@ -332,8 +352,74 @@ def assemble_ifc(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
             )
             schemas[schema][f"roads_{suffix}_storage_key"] = network_key
 
+        # Федеративные файлы по слоям (Шаг 2.10, п. 1: «набор IFC-файлов по
+        # слоям (federated model): relief.ifc, buildings.ifc, power.ifc...»).
+        # Каждый — независимый `SiteModel` только со своим слоем (те же уже
+        # посчитанные объекты, что и в комбинированном `site.ifc` выше, без
+        # пересборки геометрии), тот же приём, что и у `roads_backbone/
+        # internal` (свой namespace реестра GlobalId, иначе `ON CONFLICT`
+        # затёр бы GlobalId комбинированного файла). У `buildings`/`power`
+        # НЕТ своего TIN (не дублируем самый тяжёлый по памяти меш, та же
+        # причина, что и у `roads_backbone/internal`) — их объекты несут
+        # свою абсолютную высоту (`base_z`/расчётная опора уже над рельефом
+        # в комбинированном `site.ifc`), кроме `power`: без TIN его точки
+        # интерполяции рельефа падают на плоскость z=0 (см.
+        # `_terrain_elevation` в `ifc/assemble.py`) — то есть провода/опоры в
+        # ЭТОМ отдельном файле привязаны к z=0, не к реальному рельефу
+        # (известное упрощение, только для `power.ifc`; в комбинированном
+        # `site.ifc` рельеф есть и высоты верны).
+        layer_models = {
+            "relief": SiteModel(tin=tin),
+            "buildings": SiteModel(buildings=buildings),
+            "power": SiteModel(
+                power_poles=power_poles, power_wires=power_wires,
+                substations=substations, power_safety_zones=power_safety_zones,
+            ),
+        }
+        for layer_name, layer_model in layer_models.items():
+            layer_model_ifc, layer_registry = build_site_ifc(schema, layer_model, base_point)
+            issues = validate_model(layer_model_ifc)
+            if issues:
+                raise RuntimeError(f"{layer_name} ({schema}) не прошёл ifcopenshell.validate: {issues[:3]!r}")
+            register_global_ids(conn, f"{model_id}:{layer_name}", layer_registry)
+
+            layer_key = f"jobs/{job.id}/{layer_name}_{schema.lower()}.ifc"
+            storage.upload(
+                layer_key, layer_model_ifc.to_string().encode("utf-8"), content_type="application/x-step"
+            )
+            schemas[schema][f"{layer_name}_storage_key"] = layer_key
+
+    # Форматы, не зависящие от IFC-схемы (Шаг 2.10, п. 2) — строятся ОДИН
+    # раз (не в цикле по `IFC_SCHEMAS` выше), из уже готовых в памяти
+    # структур (`tin`, `roads`, `rail`, `buildings`, `water_areas`,
+    # `waterways`) — та же экономия, что и у федеративных IFC-слоёв: не
+    # пересчитывать TIN/геометрию по новой.
+    landxml_bytes = build_landxml(tin, roads=roads, rail=rail)
+    landxml_key = f"jobs/{job.id}/site.landxml"
+    storage.upload(landxml_key, landxml_bytes, content_type="application/xml")
+
+    cityjson_doc = build_cityjson(buildings)
+    cityjson_key = f"jobs/{job.id}/site.cityjson"
+    storage.upload(
+        cityjson_key, json.dumps(cityjson_doc, ensure_ascii=False).encode("utf-8"), content_type="application/json"
+    )
+
+    dxf_bytes = build_dxf(buildings=buildings, roads=roads, water_areas=water_areas, waterways=waterways)
+    dxf_key = f"jobs/{job.id}/site.dxf"
+    storage.upload(dxf_key, dxf_bytes, content_type="application/dxf")
+
     return {
         "schemas": schemas,
+        "landxml_storage_key": landxml_key,
+        "cityjson_storage_key": cityjson_key,
+        "dxf_storage_key": dxf_key,
+        # Сохраняем базовую точку здесь, чтобы `package_outputs` (Шаг 2.10,
+        # п. 3) не пересчитывал высоту через TIN заново - интерполяция
+        # требует загрузки/перестройки TIN, самой тяжёлой по памяти части
+        # сборки (см. комментарий у федеративных IFC-слоёв выше).
+        "base_point": {
+            "x": base_point.x, "y": base_point.y, "height": base_point.height, "zone": base_point.zone,
+        },
         "tin_vertices": int(tin.vertices.shape[0]),
         "buildings": len(buildings),
         "roads": len(roads),
@@ -374,12 +460,150 @@ def convert_to_glb(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     return {"storage_key": key, "size_bytes": len(glb_bytes)}
 
 
+# Слои пакета (Шаг 2.10, п. 3, `layers` в `meta.json`) - "networks"/
+# "constraints" (Этап 3, Шаги 3.1/3.4) сюда не входят, их ещё нет.
+# "status" - ни один слой не официальные регуляторные данные (те появятся
+# только в Этапе 3), у всех статус "расчётно" (посчитаны из тегов OSM +
+# эвристик, не заявлены как официальный документ) - честно, не завышаем.
+_PACKAGE_LAYERS_META: list[dict[str, str]] = [
+    {"name": "relief", "lod": "LOD1", "status": "расчётно"},
+    {"name": "roads_backbone", "lod": "LOD1", "status": "расчётно"},
+    {"name": "roads_local", "lod": "LOD1", "status": "расчётно"},
+    {"name": "buildings", "lod": "LOD2", "status": "расчётно"},
+    {"name": "power", "lod": "LOD1", "status": "расчётно"},
+    {"name": "vegetation", "lod": "LOD1", "status": "расчётно"},
+    {"name": "site", "lod": "LOD1", "status": "расчётно"},
+]
+
+
+def _collect_sources(conn: Any, job: store.Job, zone: int) -> list[dict[str, str]]:
+    """Журнал источников (Шаг 2.10, п. 3, `sources` в `meta.json`) — реальные
+    записи `osm_import_log` (Шаг 1.1, п. 4) и `dem_coverage` (Шаг 1.2, п. 4,
+    покрытия, пересекающие bbox задачи), не выдуманные значения.
+
+    Лицензия OSM (ODbL) — известная константа для ЛЮБОЙ записи этого
+    журнала (он ведётся только для OSM-загрузок, см. `import_log.py`).
+    Лицензия рельефа НЕ хранится в `dem_coverage` (поле отсутствует в схеме
+    таблицы, Шаг 1.2) — честно помечена как не зафиксированная, а не
+    придумана (см. `docs/output-formats.md`)."""
+    # На случай, если ни один импорт/покрытие не были зарегистрированы через
+    # CLI (`osm/cli.py`) в этом окружении — таблиц может не быть вовсе,
+    # `ensure_schema` идемпотентен (тот же приём, что и `ensure_ifc_registry_schema` выше).
+    ensure_import_log_schema(conn)
+    ensure_dem_coverage_schema(conn)
+
+    sources: list[dict[str, str]] = []
+    for entry in all_latest_sources(conn):
+        sources.append(
+            {
+                "name": entry.source_name,
+                "retrieved_at": entry.data_timestamp.date().isoformat(),
+                "license": "ODbL",
+            }
+        )
+
+    bbox = _wgs84_bbox_for_radius(job.center_lon, job.center_lat, job.radius_m, zone)
+    seen_relief_sources: set[str] = set()
+    for coverage in find_coverage(conn, bbox):
+        if coverage.source_name in seen_relief_sources:
+            continue
+        seen_relief_sources.add(coverage.source_name)
+        sources.append(
+            {
+                "name": coverage.source_name,
+                "retrieved_at": coverage.data_timestamp.date().isoformat(),
+                "license": "не зафиксирована в реестре покрытия (dem_coverage, Шаг 1.2, п. 4)",
+            }
+        )
+    return sources
+
+
+def package_outputs(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
+    """Шаг 2.10, п. 3: `meta.json` (схема `schemas/meta.schema.json`, Шаг
+    0.8) + zip-архив всех файлов задачи. Последний, лёгкий шаг конвейера —
+    только скачивает уже загруженные в Storage байты предыдущих шагов и
+    упаковывает их, БЕЗ пересборки TIN/геометрии (та же экономия памяти,
+    что и у федеративных IFC-слоёв в `assemble_ifc`).
+
+    Имя `roads_internal` (внутренний ключ Storage с Шага 2.4) здесь
+    переименовывается в архиве в `roads_local` — так называет итоговый файл
+    `docs/data-dictionary.md` §4, отдельно от промежуточного имени шага
+    конвейера, как и предусмотрено в этой таблице (`roads_backbone.ifc`/
+    `roads_local.ifc`)."""
+    zone = pick_msk59_zone(job.center_lon)
+    steps_by_name = {s.step_name: s for s in job.steps}
+    normalize_result = steps_by_name["select_and_normalize"].result or {}
+    assemble_result = steps_by_name["assemble_ifc"].result or {}
+    glb_result = steps_by_name["convert_to_glb"].result or {}
+    base_point = assemble_result["base_point"]
+
+    # (архивный путь, storage_key, format, layer) - format/layer как в
+    # `schemas/meta.schema.json` (`files[].format` enum, `files[].layer` -
+    # свободная строка, не обязана совпадать с `layers[].name`).
+    entries: list[tuple[str, str, str, str]] = [
+        ("site.gpkg", normalize_result["storage_key"], "GeoPackage", "site"),
+    ]
+    for schema in IFC_SCHEMAS:
+        schema_result = assemble_result["schemas"][schema]
+        suffix = schema.lower()
+        entries.append((f"site_{suffix}.ifc", schema_result["storage_key"], schema, "site"))
+        entries.append(
+            (f"roads_backbone_{suffix}.ifc", schema_result["roads_backbone_storage_key"], schema, "roads_backbone")
+        )
+        entries.append(
+            (f"roads_local_{suffix}.ifc", schema_result["roads_internal_storage_key"], schema, "roads_local")
+        )
+        entries.append((f"relief_{suffix}.ifc", schema_result["relief_storage_key"], schema, "relief"))
+        entries.append((f"buildings_{suffix}.ifc", schema_result["buildings_storage_key"], schema, "buildings"))
+        entries.append((f"power_{suffix}.ifc", schema_result["power_storage_key"], schema, "power"))
+    entries.append(("site.landxml", assemble_result["landxml_storage_key"], "LandXML", "рельеф+дороги"))
+    entries.append(("site.cityjson", assemble_result["cityjson_storage_key"], "CityJSON", "buildings"))
+    entries.append(("site.dxf", assemble_result["dxf_storage_key"], "DXF", "здания+дороги+вода"))
+    entries.append(("site.glb", glb_result["storage_key"], "GLB", "site"))
+
+    files_meta: list[dict[str, Any]] = []
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for archive_path, storage_key, fmt, layer in entries:
+            data = storage.download(storage_key)
+            zf.writestr(archive_path, data)
+            files_meta.append({"path": archive_path, "format": fmt, "layer": layer, "size_bytes": len(data)})
+
+        meta = {
+            "task_id": str(job.id),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "generator_version": __version__,
+            "center": {"lon": job.center_lon, "lat": job.center_lat},
+            "radius_m": job.radius_m,
+            "coordinate_system": {
+                "projected_crs": "MSK-59",
+                "zone": zone,
+                "height_system": "Балтийская",
+                "base_point": {"x": base_point["x"], "y": base_point["y"], "height": base_point["height"]},
+            },
+            "layers": _PACKAGE_LAYERS_META,
+            "files": files_meta,
+            "sources": _collect_sources(conn, job, zone),
+        }
+        meta_bytes = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
+        zf.writestr("meta.json", meta_bytes)
+
+    meta_key = f"jobs/{job.id}/meta.json"
+    storage.upload(meta_key, meta_bytes, content_type="application/json")
+
+    archive_key = f"jobs/{job.id}/package.zip"
+    storage.upload(archive_key, zip_buffer.getvalue(), content_type="application/zip")
+
+    return {"meta_storage_key": meta_key, "archive_storage_key": archive_key, "file_count": len(files_meta) + 1}
+
+
 DEFAULT_PIPELINE: dict[str, Any] = {
     "select_osm": select_osm,
     "prepare_relief": prepare_relief,
     "select_and_normalize": select_and_normalize,
     "assemble_ifc": assemble_ifc,
     "convert_to_glb": convert_to_glb,
+    "package_outputs": package_outputs,
 }
 
 DEFAULT_STEP_NAMES: list[str] = list(DEFAULT_PIPELINE)

@@ -9,8 +9,10 @@
 `IMPORT_LOG_SCHEMA_SQL` — встроенная копия `geo/sql/001_import_log.sql`
 (нужна, чтобы приложение могло создать схему само, не полагаясь на то, что
 файл миграции попал в установленный пакет); тест
-`geo/tests/test_osm_import_log.py::test_sql_file_matches_embedded_schema`
-не даёт им разойтись.
+`geo/tests/test_osm_sql_migrations.py::test_sql_file_matches_embedded_schema`
+не даёт им разойтись (честная правка ранее неверного пути в этом
+докстринге — сам тест лежит не в файле `test_osm_import_log.py`, как здесь
+утверждалось, а в `test_osm_sql_migrations.py`, Шаг 2.10).
 """
 
 from __future__ import annotations
@@ -65,6 +67,21 @@ def record_import(conn: _Connection, entry: ImportLogEntry) -> int:
         row = cur.fetchone()
     conn.commit()
     return row[0]
+
+
+def all_latest_sources(conn: _Connection) -> list[ImportLogEntry]:
+    """Последняя запись КАЖДОГО источника (`source_name` не зафиксирован в
+    коде константой — задаётся оператором при импорте, `osm/cli.py`) — для
+    журнала источников пакета выгрузки (Шаг 2.10, п. 3, `sources` в
+    `meta.json`): честно перечисляет то, что реально было загружено, не
+    угадывает единственное «каноническое» имя источника."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (source_name) source_name, source_file, data_timestamp, notes "
+            "FROM osm_import_log ORDER BY source_name, data_timestamp DESC"
+        )
+        rows = cur.fetchall()
+    return [ImportLogEntry(source_name=r[0], source_file=r[1], data_timestamp=r[2], notes=r[3]) for r in rows]
 
 
 def latest_import(conn: _Connection, source_name: str) -> ImportLogEntry | None:
