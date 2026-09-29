@@ -26,6 +26,7 @@ MANIFEST_PATH = Path(__file__).with_name("manifest.json")
 
 KIND_GENERATOR = "generator"
 KIND_TEXTURE = "texture"
+KIND_MODEL = "model"  # готовая детальная 3D-модель (USD/GLB) для подстановки по типу (Шаг 4.1, п. 2)
 
 
 @dataclass(frozen=True)
