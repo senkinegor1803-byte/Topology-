@@ -27,7 +27,7 @@ app = Celery(
     # без include воркер, запущенный как `celery -A topology_geo.tasks.celery_app`,
     # никогда не импортирует pipeline_tasks.py и не увидит задачу @app.task в нём
     # (регистрация задач привязана к импорту модуля, а не к самому объекту app).
-    include=["topology_geo.tasks.pipeline_tasks", "topology_geo.tasks.tile_tasks"],
+    include=["topology_geo.tasks.pipeline_tasks", "topology_geo.tasks.tile_tasks", "topology_geo.tasks.render_tasks"],
 )
 app.conf.update(
     task_serializer="json",
@@ -38,4 +38,10 @@ app.conf.update(
     # для тестов API: выполнить задачу синхронно в том же процессе, без брокера
     task_always_eager=os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true",
     task_eager_propagates=True,
+    # приоритеты очереди рендера (Шаг 4.5, п. 3) - только транспорт Redis
+    # поддерживает их так; 0..9, где 0 - наивысший приоритет (соглашение
+    # AMQP/Celery, не наоборот - см. docstring `tasks/render_tasks.py`).
+    task_queue_max_priority=9,
+    task_default_priority=5,
+    broker_transport_options={"priority_steps": list(range(10)), "sep": ":", "queue_order_strategy": "priority"},
 )

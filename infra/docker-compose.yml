@@ -69,6 +69,26 @@ services:
       minio:
         condition: service_healthy
 
+  # Рендер-воркер (Шаг 4.5, п. 1) - отдельный сервис/образ от основного
+  # `worker`: тяжёлая зависимость `bpy` (374 МБ) не нужна воркеру конвейера
+  # IFC/OSM, и на реальном GPU-хосте этот сервис запускают с `--gpus all`
+  # и на GPU-базовом образе (см. `render-worker.Dockerfile`) - без GPU в
+  # этой среде сервис не собирался и не запускался, см. его докстринг.
+  render-worker:
+    build:
+      context: ../geo
+      dockerfile: ../infra/render-worker.Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-topology}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-topology12345}
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
 volumes:
   postgis_data:
   redis_data:
