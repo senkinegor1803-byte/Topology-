@@ -63,19 +63,23 @@ def run_job_step_task(job_id: str) -> str | None:
 
 
 def _notify_job_completion(job_id: str, status: str) -> None:
-    """«Статусы задач с прогрессом и уведомлениями» (Шаг 4.10, п. 3) — только
-    если у задачи есть владелец (Шаг 4.10: анонимные задачи, Шаг 1.3,
-    уведомлять некого)."""
+    """«Статусы задач с прогрессом и уведомлениями» (Шаг 4.10, п. 3) и
+    «вебхуки о готовности задачи» (Шаг 4.11, п. 4) — оба только если у
+    задачи есть владелец (анонимные задачи, Шаг 1.3, уведомлять/дёргать
+    вебхуком некого)."""
+    from topology_geo.auth import integrations as auth_integrations
     from topology_geo.auth import store as auth_store
 
     conn = _connect()
     try:
-        auth_store.ensure_schema(conn)
+        auth_integrations.ensure_schema(conn)
         owner_id = auth_store.get_job_owner(conn, job_id)
         if owner_id is None:
             return
         message = "Задача выполнена" if status == store.STATUS_DONE else "Задача завершилась с ошибкой"
         auth_store.create_notification(conn, user_id=owner_id, message=message, job_id=job_id)
+        for webhook in auth_integrations.list_webhooks(conn, owner_id):
+            auth_integrations.deliver_webhook(webhook.url, {"job_id": str(job_id), "status": status})
     finally:
         conn.close()
 

@@ -138,3 +138,37 @@ class ClosedContourZoneOut(BaseModel):
 class ClosedContourResponse(BaseModel):
     job_id: uuid.UUID
     zones: list[ClosedContourZoneOut]
+
+
+class ApiKeyCreateRequest(BaseModel):
+    label: str = Field(..., min_length=1)
+
+
+class ApiKeyCreateResponse(BaseModel):
+    id: int
+    label: str
+    created_at: datetime
+    key: str = Field(..., description="Реальное значение ключа — показывается только один раз, при создании")
+
+
+class ApiKeyOut(BaseModel):
+    id: int
+    label: str
+    created_at: datetime
+    revoked_at: datetime | None
+
+
+class WebhookRegisterRequest(BaseModel):
+    url: str
+
+
+class WebhookOut(BaseModel):
+    id: int
+    url: str
+    created_at: datetime
+
+
+class ExchangeFolderExportResponse(BaseModel):
+    job_folder: str
+    exported_files: list[str]
+    missing_keys: list[str]

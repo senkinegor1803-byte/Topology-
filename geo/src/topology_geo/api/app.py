@@ -21,9 +21,13 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from topology_geo.api.schemas import (
+    ApiKeyCreateRequest,
+    ApiKeyCreateResponse,
+    ApiKeyOut,
     Center,
     ClosedContourResponse,
     ClosedContourZoneOut,
+    ExchangeFolderExportResponse,
     FileOut,
     FilesResponse,
     JobCreateRequest,
@@ -38,11 +42,15 @@ from topology_geo.api.schemas import (
     ShareLinkResponse,
     TokenResponse,
     UserOut,
+    WebhookOut,
+    WebhookRegisterRequest,
 )
+from topology_geo.auth import integrations as auth_integrations
 from topology_geo.auth import store as auth_store
 from topology_geo.constraints import store as constraints_store
 from topology_geo.coords import msk59_to_wgs84, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.devcheck import load_environment_config
+from topology_geo.export.exchange_folder import export_job_to_exchange_folder
 from topology_geo.jobs import store
 from topology_geo.jobs.steps import DEFAULT_STEP_NAMES
 from topology_geo.tasks.pipeline_tasks import enqueue_job, get_storage
@@ -69,7 +77,7 @@ def get_connection():
 async def lifespan(app: FastAPI):
     conn = _connect()
     try:
-        auth_store.ensure_schema(conn)  # создаёт и jobs (Шаг 1.3), и users/... (Шаг 4.10)
+        auth_integrations.ensure_schema(conn)  # каскадом: jobs (1.3) -> users/... (4.10) -> api_keys/webhooks (4.11)
     finally:
         conn.close()
     yield
@@ -141,14 +149,23 @@ def _user_to_out(user: auth_store.User) -> UserOut:
     )
 
 
-def get_current_user(conn=Depends(get_connection), authorization: str | None = Header(None)) -> auth_store.User | None:
-    """Опциональная авторизация (Шаг 4.10, п. 1): `None` без заголовка или с
-    невалидным токеном — так `POST /jobs` остаётся рабочим для анонимных
-    запросов (существующее поведение Шага 1.3, ни один старый тест не
-    передаёт `Authorization`), а не требует токен принудительно."""
-    if not authorization or not authorization.startswith("Bearer "):
-        return None
-    return auth_store.get_user_by_token(conn, authorization.removeprefix("Bearer "))
+def get_current_user(
+    conn=Depends(get_connection), authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None),
+) -> auth_store.User | None:
+    """Опциональная авторизация (Шаг 4.10, п. 1 / Шаг 4.11, п. 2):
+    `Authorization: Bearer <токен сессии>` ИЛИ `X-API-Key: <ключ>` — `None`
+    без заголовков или с невалидным значением, так `POST /jobs` остаётся
+    рабочим для анонимных запросов (существующее поведение Шага 1.3, ни
+    один старый тест не передаёт эти заголовки), а не требует их
+    принудительно."""
+    if authorization and authorization.startswith("Bearer "):
+        user = auth_store.get_user_by_token(conn, authorization.removeprefix("Bearer "))
+        if user is not None:
+            return user
+    if x_api_key:
+        return auth_integrations.get_user_by_api_key(conn, x_api_key)
+    return None
 
 
 def require_user(user: auth_store.User | None = Depends(get_current_user)) -> auth_store.User:
@@ -408,3 +425,93 @@ def download_job_file(job_id: uuid.UUID, key: str, conn=Depends(get_connection))
     elif key.endswith(".ifc"):
         media_type = "application/x-step"
     return Response(content=data, media_type=media_type)
+
+
+@app.post("/me/api-keys", response_model=ApiKeyCreateResponse, status_code=201)
+def create_my_api_key(
+    payload: ApiKeyCreateRequest, user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> ApiKeyCreateResponse:
+    """«Ключи доступа» (Шаг 4.11, п. 2) — для машинных клиентов, отдельно
+    от сессионных токенов (Шаг 4.10): передаются заголовком `X-API-Key`
+    (см. `get_current_user`), не истекают по времени, отзываются вручную."""
+    raw_key, meta = auth_integrations.create_api_key(conn, user.id, label=payload.label)
+    return ApiKeyCreateResponse(id=meta.id, label=meta.label, created_at=meta.created_at, key=raw_key)
+
+
+@app.get("/me/api-keys", response_model=list[ApiKeyOut])
+def list_my_api_keys(user: auth_store.User = Depends(require_user), conn=Depends(get_connection)) -> list[ApiKeyOut]:
+    return [
+        ApiKeyOut(id=k.id, label=k.label, created_at=k.created_at, revoked_at=k.revoked_at)
+        for k in auth_integrations.list_api_keys(conn, user.id)
+    ]
+
+
+@app.delete("/me/api-keys/{key_id}", status_code=204)
+def revoke_my_api_key(
+    key_id: int, user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> Response:
+    if not auth_integrations.revoke_api_key(conn, key_id, user.id):
+        raise HTTPException(status_code=404, detail="ключ не найден")
+    return Response(status_code=204)
+
+
+@app.post("/me/webhooks", response_model=WebhookOut, status_code=201)
+def register_my_webhook(
+    payload: WebhookRegisterRequest, user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> WebhookOut:
+    """«Вебхуки о готовности задачи» (Шаг 4.11, п. 4) — доставка настоящим
+    HTTP POST при переходе задачи в терминальный статус, см.
+    `tasks.pipeline_tasks._notify_job_completion`."""
+    try:
+        webhook = auth_integrations.register_webhook(conn, user.id, url=payload.url)
+    except auth_integrations.InvalidWebhookUrlError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return WebhookOut(id=webhook.id, url=webhook.url, created_at=webhook.created_at)
+
+
+@app.get("/me/webhooks", response_model=list[WebhookOut])
+def list_my_webhooks(user: auth_store.User = Depends(require_user), conn=Depends(get_connection)) -> list[WebhookOut]:
+    return [WebhookOut(id=w.id, url=w.url, created_at=w.created_at) for w in auth_integrations.list_webhooks(conn, user.id)]
+
+
+@app.delete("/me/webhooks/{webhook_id}", status_code=204)
+def revoke_my_webhook(
+    webhook_id: int, user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> Response:
+    if not auth_integrations.revoke_webhook(conn, webhook_id, user.id):
+        raise HTTPException(status_code=404, detail="вебхук не найден")
+    return Response(status_code=204)
+
+
+@app.post("/jobs/{job_id}/export-to-pilot-bim", response_model=ExchangeFolderExportResponse)
+def export_job_to_pilot_bim(
+    job_id: uuid.UUID, user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> ExchangeFolderExportResponse:
+    """Выгрузка в Pilot-BIM через папку обмена (Шаг 4.11, п. 3) — см.
+    докстринг `export.exchange_folder`: настоящая интеграция с API
+    Pilot-BIM не выполнена (проприетарная платформа, нет доступа), план
+    явно предлагает эту альтернативу. Путь папки — `PILOT_BIM_EXCHANGE_
+    DIR` (тот же приём конфигурации, что `TOPOLOGY_STORAGE_ROOT`/
+    `CITYMAP_DATA_DIR`); без переменной — понятная ошибка, а не падение."""
+    exchange_dir = os.environ.get("PILOT_BIM_EXCHANGE_DIR")
+    if not exchange_dir:
+        raise HTTPException(status_code=503, detail="папка обмена с Pilot-BIM не настроена (PILOT_BIM_EXCHANGE_DIR)")
+
+    job = store.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="задача не найдена")
+    owner_id = auth_store.get_job_owner(conn, job_id)
+    if owner_id is not None and owner_id != user.id:
+        raise HTTPException(status_code=403, detail="только владелец задачи может выгрузить её в Pilot-BIM")
+
+    files = get_job_files(job_id, conn=conn)
+    ifc_keys = [f.storage_key for f in files.files if f.storage_key.endswith(".ifc")]
+    if not ifc_keys:
+        raise HTTPException(status_code=404, detail="для задачи ещё нет готовой IFC-модели")
+
+    result = export_job_to_exchange_folder(get_storage(), job_id, ifc_keys, Path(exchange_dir))
+    return ExchangeFolderExportResponse(
+        job_folder=str(result.job_folder),
+        exported_files=[str(p) for p in result.exported_files],
+        missing_keys=result.missing_keys,
+    )
