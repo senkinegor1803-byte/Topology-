@@ -35,6 +35,7 @@ from topology_geo.tasks.pipeline_tasks import enqueue_job, get_storage
 
 VIEWER_DIR = Path(__file__).resolve().parents[1] / "web" / "viewer"
 CITYMAP_DIR = Path(__file__).resolve().parents[1] / "web" / "citymap"
+PANORAMA_DIR = Path(__file__).resolve().parents[1] / "web" / "panorama"
 
 
 def _connect() -> psycopg.Connection:
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Топология: API конвейера", version="0.1.0", lifespan=lifespan)
 app.mount("/viewer", StaticFiles(directory=VIEWER_DIR), name="viewer")
 app.mount("/citymap", StaticFiles(directory=CITYMAP_DIR), name="citymap")
+app.mount("/panorama", StaticFiles(directory=PANORAMA_DIR), name="panorama")
 
 # Данные карты города (city.pmtiles + пирамида terrain-RGB) — общегородские
 # артефакты, не привязанные к конкретной задаче (в отличие от /models/*), их

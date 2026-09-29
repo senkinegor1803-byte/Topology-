@@ -48,7 +48,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-topology_geo = ["web/viewer/*.html", "web/viewer/vendor/*.js", "web/viewer/vendor/utils/*.js"]
+topology_geo = ["web/viewer/*.html", "web/viewer/vendor/*.js", "web/viewer/vendor/utils/*.js", "web/panorama/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

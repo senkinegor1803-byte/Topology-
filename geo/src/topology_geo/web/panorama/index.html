@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Топология — панорамы 360°</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, sans-serif; background: #14161a; color: #e6e6e6; }
+  #app { display: flex; height: 100%; width: 100%; }
+  #points-panel {
+    width: 240px; flex: 0 0 auto; background: #1c1f24; overflow-y: auto;
+    padding: 12px; border-right: 1px solid #2a2e35;
+  }
+  #points-panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #9aa4b2; margin: 0 0 10px; }
+  #points-panel ul { list-style: none; margin: 0; padding: 0; }
+  #points-panel li {
+    padding: 8px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; color: #c3cad4; margin-bottom: 2px;
+  }
+  #points-panel li:hover { background: #2a2e35; }
+  #points-panel li.active { background: #35507a; color: #fff; }
+  #viewport-wrap { flex: 1 1 auto; position: relative; min-width: 0; }
+  #viewport { width: 100%; height: 100%; display: block; }
+  #status { position: absolute; top: 8px; left: 8px; font-size: 12px; color: #9aa4b2; background: rgba(0,0,0,.4); padding: 4px 8px; border-radius: 4px; }
+  #error-banner {
+    display: none; position: absolute; top: 0; left: 0; right: 0; padding: 10px 16px;
+    background: #7a2020; color: #fff; font-size: 13px; z-index: 10;
+  }
+  #empty-hint { color: #6b7280; font-size: 13px; }
+  @media (max-width: 720px) {
+    #app { flex-direction: column; }
+    #points-panel { width: 100%; height: 140px; border: none; border-bottom: 1px solid #2a2e35; }
+    #viewport-wrap { flex: 1 1 auto; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="points-panel">
+    <h2>Точки съёмки</h2>
+    <ul id="points-list"><div id="empty-hint">Загрузка списка…</div></ul>
+  </div>
+  <div id="viewport-wrap">
+    <div id="error-banner"></div>
+    <div id="status"></div>
+    <canvas id="viewport"></canvas>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "../viewer/vendor/three.module.min.js",
+    "three/addons/controls/OrbitControls.js": "../viewer/vendor/OrbitControls.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const params = new URLSearchParams(window.location.search);
+const manifestUrl = params.get("manifest");
+const statusEl = document.getElementById("status");
+const errorEl = document.getElementById("error-banner");
+const listEl = document.getElementById("points-list");
+
+function showError(message) {
+  errorEl.textContent = message;
+  errorEl.style.display = "block";
+}
+
+if (!manifestUrl) {
+  showError("Не указан параметр ?manifest=<ссылка на JSON со списком точек> — открыть нечем.");
+}
+
+const canvas = document.getElementById("viewport");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 10);
+camera.position.set(0, 0, 0.01);
+
+// Сфера с текстурой ИЗНУТРИ (BackSide) - стандартная техника показа
+// эквидистантной (equirectangular) панорамы в three.js.
+const sphereGeometry = new THREE.SphereGeometry(5, 64, 40);
+sphereGeometry.scale(-1, 1, 1);
+const sphereMaterialA = new THREE.MeshBasicMaterial({ transparent: true, opacity: 1 });
+const sphereMaterialB = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 });
+const sphereA = new THREE.Mesh(sphereGeometry, sphereMaterialA);
+const sphereB = new THREE.Mesh(sphereGeometry.clone(), sphereMaterialB);
+scene.add(sphereA, sphereB);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableZoom = false; // масштаб внутри сферы панорамы не имеет смысла
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.rotateSpeed = -0.4; // тянем картинку, а не камеру - интуитивнее для панорамы
+
+function resize() {
+  const { clientWidth, clientHeight } = canvas.parentElement;
+  renderer.setSize(clientWidth, clientHeight, false);
+  camera.aspect = clientWidth / Math.max(clientHeight, 1);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+resize();
+
+function animate() {
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+
+const textureLoader = new THREE.TextureLoader();
+let currentFrontMaterial = sphereMaterialA;
+let currentBackMaterial = sphereMaterialB;
+window.currentPanoramaUrl = null; // для тестов/отладки (Playwright не видит переменные модуля)
+
+function loadPanorama(url) {
+  return new Promise((resolve, reject) => {
+    textureLoader.load(
+      url,
+      (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        currentBackMaterial.map = texture;
+        currentBackMaterial.opacity = 0;
+        currentBackMaterial.needsUpdate = true;
+
+        // плавный переход (п. 2 плана: «вьюер панорам с переходами между
+        // точками») - линейный fade за ~600 мс, не мгновенная подмена текстуры
+        const durationMs = 600;
+        const startedAt = performance.now();
+        function fade(now) {
+          const t = Math.min((now - startedAt) / durationMs, 1);
+          currentBackMaterial.opacity = t;
+          currentFrontMaterial.opacity = 1 - t;
+          if (t < 1) {
+            requestAnimationFrame(fade);
+          } else {
+            [currentFrontMaterial, currentBackMaterial] = [currentBackMaterial, currentFrontMaterial];
+            window.currentPanoramaUrl = url;
+            resolve();
+          }
+        }
+        requestAnimationFrame(fade);
+      },
+      undefined,
+      reject,
+    );
+  });
+}
+
+function selectPoint(point, listItemEl) {
+  document.querySelectorAll("#points-list li").forEach((el) => el.classList.remove("active"));
+  if (listItemEl) listItemEl.classList.add("active");
+  statusEl.textContent = `Загрузка панорамы «${point.label}»…`;
+  loadPanorama(point.url)
+    .then(() => { statusEl.textContent = point.label; })
+    .catch(() => showError(`Не удалось загрузить панораму: ${point.url}`));
+}
+
+async function main() {
+  if (!manifestUrl) return;
+  const startedAt = performance.now();
+  const points = await (await fetch(manifestUrl)).json();
+  if (!Array.isArray(points) || points.length === 0) {
+    listEl.innerHTML = '<div id="empty-hint">Нет точек съёмки.</div>';
+    return;
+  }
+  listEl.innerHTML = "";
+  points.forEach((point, index) => {
+    const li = document.createElement("li");
+    li.textContent = point.label;
+    li.addEventListener("click", () => selectPoint(point, li));
+    listEl.appendChild(li);
+    if (index === 0) selectPoint(point, li);
+  });
+  const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+  statusEl.textContent = `Список загружен за ${seconds} с`;
+}
+
+main().catch((error) => showError("Не удалось загрузить список панорам: " + (error && error.message ? error.message : error)));
+</script>
+</body>
+</html>
