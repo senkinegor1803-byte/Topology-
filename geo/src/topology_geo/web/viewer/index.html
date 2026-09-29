@@ -24,6 +24,12 @@
   .layer li:hover { background: #2a2e35; }
   .layer li.selected { background: #35507a; color: #fff; }
   #status { position: absolute; top: 8px; left: 8px; font-size: 12px; color: #9aa4b2; background: rgba(0,0,0,.4); padding: 4px 8px; border-radius: 4px; }
+  #view-mode-toggle {
+    position: absolute; top: 8px; right: 8px; font-size: 12px; color: #e6e6e6;
+    background: rgba(0,0,0,.5); border: 1px solid #444a55; border-radius: 4px;
+    padding: 4px 10px; cursor: pointer;
+  }
+  #view-mode-toggle:hover { background: rgba(0,0,0,.7); }
   #props-panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
   #props-panel td { padding: 3px 2px; border-bottom: 1px solid #2a2e35; vertical-align: top; word-break: break-word; }
   #props-panel td.k { color: #9aa4b2; width: 45%; }
@@ -49,6 +55,7 @@
   <div id="viewport-wrap">
     <div id="error-banner"></div>
     <div id="status"></div>
+    <button id="view-mode-toggle" title="Переключить между запечённым освещением и техническим видом">Презентационный вид</button>
     <canvas id="viewport"></canvas>
   </div>
   <div id="props-panel">
@@ -220,6 +227,45 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let modelRoot = null;
 
+// Шаг 4.2: переключатель «технический / презентационный вид». Меши
+// ближнего кольца (LOD2) c запечёнными вершинными цветами (`COLOR_0` -
+// AO×тень от солнца, `rendering/lightmap_bake.py`) уже несут
+// `material.vertexColors = true` из самого GLB (three.js GLTFLoader
+// включает его сам, если у примитива есть COLOR_0) - здесь только
+// временно отключаем/включаем это умножение, не трогая геометрию и не
+// перезагружая модель.
+let presentationalMode = true;
+const bakedLitMaterials = new Set();
+window.bakedLitMaterials = bakedLitMaterials; // для тестов/отладки (Playwright не видит переменные модуля)
+const viewModeToggle = document.getElementById("view-mode-toggle");
+viewModeToggle.style.display = "none";
+
+function registerBakedLitMaterials(root) {
+  root.traverse((obj) => {
+    if (!obj.isMesh || !obj.geometry.attributes.color) return;
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const material of materials) {
+      if (!material || bakedLitMaterials.has(material)) continue;
+      bakedLitMaterials.add(material);
+    }
+  });
+  if (bakedLitMaterials.size > 0) viewModeToggle.style.display = "block";
+  applyViewMode();
+}
+
+function applyViewMode() {
+  for (const material of bakedLitMaterials) {
+    material.vertexColors = presentationalMode;
+    material.needsUpdate = true;
+  }
+}
+
+viewModeToggle.addEventListener("click", () => {
+  presentationalMode = !presentationalMode;
+  viewModeToggle.textContent = presentationalMode ? "Презентационный вид" : "Технический вид";
+  applyViewMode();
+});
+
 canvas.addEventListener("pointerdown", (event) => {
   if (!modelRoot) return;
   const rect = canvas.getBoundingClientRect();
@@ -246,6 +292,7 @@ if (modelUrl) {
       gltf.scene.traverse((obj) => {
         if (obj.isMesh) obj.geometry.computeVertexNormals();
       });
+      registerBakedLitMaterials(gltf.scene);
       modelRoot = gltf.scene.children[0] || gltf.scene;
       scene.add(gltf.scene);
       buildTree(modelRoot);
@@ -339,6 +386,7 @@ async function loadTileset(url, job) {
           gltf.scene.traverse((obj) => {
             if (obj.isMesh) obj.geometry.computeVertexNormals();
           });
+          registerBakedLitMaterials(gltf.scene);
           mergeTileIntoCategories(gltf.scene);
           state.loaded = true;
           state.loading = false;
