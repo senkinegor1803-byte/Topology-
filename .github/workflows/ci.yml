@@ -81,3 +81,10 @@ jobs:
       - name: Validate docker-compose.yml
         working-directory: infra
         run: docker compose config
+
+      - name: Validate docker-compose.prod.yml overlay (Шаг 5.1)
+        working-directory: infra
+        env:
+          TOPOLOGY_DOMAIN: ci-placeholder.example.com
+          GRAFANA_ADMIN_PASSWORD: ci-placeholder-password
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config

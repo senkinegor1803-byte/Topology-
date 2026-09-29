@@ -1,0 +1,34 @@
+# Правила оповещений (Шаг 5.1, п. 2, критерий «мониторинг сообщает о
+# падении сервиса ≤ 5 мин»). `up == 0` — встроенная метрика Prometheus,
+# появляется автоматически для любой цели `scrape_configs` без
+# дополнительного кода — реальный, стандартный способ детектировать
+# «сервис не отвечает», не выдуманный для этого документа.
+groups:
+  - name: topology-availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервис {{ $labels.job }} не отвечает"
+          description: "Prometheus не может опросить {{ $labels.instance }} ({{ $labels.job }}) более 2 минут."
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostGIS недоступен"
+          description: "postgres_exporter сообщает, что база данных недоступна более 2 минут."
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Мало места на диске {{ $labels.mountpoint }}"
+          description: "Свободно менее 10% на {{ $labels.mountpoint }} более 5 минут — резервные копии/растровые данные могут не поместиться."

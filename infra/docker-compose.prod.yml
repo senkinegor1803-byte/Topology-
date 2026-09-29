@@ -1,0 +1,100 @@
+# Продуктивная надстройка (Шаг 5.1) поверх docker-compose.yml: HTTPS,
+# мониторинг. Запуск: `docker compose -f docker-compose.yml
+# -f docker-compose.prod.yml up -d`.
+#
+# ЧЕСТНО: провалидирован только `docker compose config` (тот же уровень
+# проверки, что у `render-worker.Dockerfile`/docker-compose.yml, Шаг 4.5)
+# — реальный прогон на сервере/в облаке не выполнялся: в этой среде нет
+# ни реального домена/DNS для ACME-сертификата Caddy, ни демона Docker
+# для сборки/запуска контейнеров. См. `docs/ops.md`.
+
+services:
+  api:
+    build:
+      context: ../geo
+    environment:
+      POSTGRES_HOST: postgis
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-topology}
+      POSTGRES_USER: ${POSTGRES_USER:-topology}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-topology}
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-topology}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-topology12345}
+    command: ["uvicorn", "topology_geo.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    expose:
+      - "8000"
+    depends_on:
+      postgis:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      TOPOLOGY_DOMAIN: ${TOPOLOGY_DOMAIN:?переменная TOPOLOGY_DOMAIN обязательна для выпуска HTTPS-сертификата}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    depends_on:
+      - api
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-topology}:${POSTGRES_PASSWORD:-topology}@postgis:5432/${POSTGRES_DB:-topology}?sslmode=disable"
+    depends_on:
+      postgis:
+        condition: service_healthy
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    expose:
+      - "9100"
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    expose:
+      - "9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?переменная GRAFANA_ADMIN_PASSWORD обязательна}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    expose:
+      - "3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  caddy_data:
+  caddy_config:
+  caddy_logs:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,27 @@
+# HTTPS (Шаг 5.1, п. 2). Caddy получает и продлевает сертификат Let's
+# Encrypt автоматически — реальный, широко используемый механизм ACME,
+# не самоподписанный сертификат «для вида». Домен подставляется из
+# переменной окружения TOPOLOGY_DOMAIN при запуске (`docker compose`
+# подставляет её в Caddyfile через встроенный envsubst-подобный
+# механизм Caddy, `{$TOPOLOGY_DOMAIN}`).
+{$TOPOLOGY_DOMAIN} {
+	reverse_proxy api:8000
+
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	log {
+		output file /var/log/caddy/access.log
+	}
+}
+
+# Grafana — отдельный поддомен, не публикуется наружу без явной настройки
+# (по умолчанию доступен только внутри docker-сети, см. docker-compose.prod.yml).
+grafana.{$TOPOLOGY_DOMAIN} {
+	reverse_proxy grafana:3000
+}
