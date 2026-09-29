@@ -16,18 +16,32 @@ from pathlib import Path
 from urllib.parse import quote
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from topology_geo.api.schemas import (
     Center,
+    ClosedContourResponse,
+    ClosedContourZoneOut,
     FileOut,
     FilesResponse,
     JobCreateRequest,
     JobCreateResponse,
     JobOut,
     JobStepOut,
+    LoginRequest,
+    NotificationOut,
+    ProjectOut,
+    RegisterRequest,
+    RoleUpdateRequest,
+    ShareLinkResponse,
+    TokenResponse,
+    UserOut,
 )
+from topology_geo.auth import store as auth_store
+from topology_geo.constraints import store as constraints_store
+from topology_geo.coords import msk59_to_wgs84, pick_msk59_zone, wgs84_to_msk59
 from topology_geo.devcheck import load_environment_config
 from topology_geo.jobs import store
 from topology_geo.jobs.steps import DEFAULT_STEP_NAMES
@@ -55,7 +69,7 @@ def get_connection():
 async def lifespan(app: FastAPI):
     conn = _connect()
     try:
-        store.ensure_schema(conn)
+        auth_store.ensure_schema(conn)  # создаёт и jobs (Шаг 1.3), и users/... (Шаг 4.10)
     finally:
         conn.close()
     yield
@@ -120,8 +134,94 @@ def _job_to_out(job: store.Job) -> JobOut:
     )
 
 
+def _user_to_out(user: auth_store.User) -> UserOut:
+    return UserOut(
+        id=user.id, email=user.email, role=user.role,
+        closed_contour_access=user.closed_contour_access, created_at=user.created_at,
+    )
+
+
+def get_current_user(conn=Depends(get_connection), authorization: str | None = Header(None)) -> auth_store.User | None:
+    """Опциональная авторизация (Шаг 4.10, п. 1): `None` без заголовка или с
+    невалидным токеном — так `POST /jobs` остаётся рабочим для анонимных
+    запросов (существующее поведение Шага 1.3, ни один старый тест не
+    передаёт `Authorization`), а не требует токен принудительно."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return auth_store.get_user_by_token(conn, authorization.removeprefix("Bearer "))
+
+
+def require_user(user: auth_store.User | None = Depends(get_current_user)) -> auth_store.User:
+    if user is None:
+        raise HTTPException(status_code=401, detail="требуется авторизация")
+    return user
+
+
+def require_admin(user: auth_store.User = Depends(require_user)) -> auth_store.User:
+    if user.role != auth_store.ROLE_ADMIN:
+        raise HTTPException(status_code=403, detail="требуется роль администратора")
+    return user
+
+
+def require_closed_contour_access(user: auth_store.User = Depends(require_user)) -> auth_store.User:
+    if not user.closed_contour_access:
+        raise HTTPException(status_code=403, detail="требуется доступ к закрытому контуру")
+    return user
+
+
+@app.post("/auth/register", response_model=TokenResponse, status_code=201)
+def register(payload: RegisterRequest, conn=Depends(get_connection)) -> TokenResponse:
+    """Самостоятельная регистрация всегда даёт роль «просмотр» (Шаг 4.10,
+    п. 1) — повышение роли делает администратор через `PATCH
+    /auth/users/{id}/role`, не сам пользователь при регистрации."""
+    try:
+        user = auth_store.create_user(conn, email=payload.email, password=payload.password)
+    except auth_store.EmailAlreadyRegisteredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    token = auth_store.create_session(conn, user.id)
+    return TokenResponse(token=token, user=_user_to_out(user))
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(payload: LoginRequest, conn=Depends(get_connection)) -> TokenResponse:
+    user = auth_store.authenticate(conn, payload.email, payload.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="неверный email или пароль")
+    token = auth_store.create_session(conn, user.id)
+    return TokenResponse(token=token, user=_user_to_out(user))
+
+
+@app.post("/auth/logout", status_code=204)
+def logout(authorization: str = Header(...), conn=Depends(get_connection)) -> Response:
+    if authorization.startswith("Bearer "):
+        auth_store.revoke_session(conn, authorization.removeprefix("Bearer "))
+    return Response(status_code=204)
+
+
+@app.get("/auth/me", response_model=UserOut)
+def get_me(user: auth_store.User = Depends(require_user)) -> UserOut:
+    return _user_to_out(user)
+
+
+@app.patch("/auth/users/{user_id}/role", response_model=UserOut)
+def update_user_role(
+    user_id: uuid.UUID, payload: RoleUpdateRequest,
+    _admin: auth_store.User = Depends(require_admin), conn=Depends(get_connection),
+) -> UserOut:
+    if payload.role not in auth_store.ROLES:
+        raise HTTPException(status_code=422, detail=f"неизвестная роль {payload.role!r}, ожидается одна из {auth_store.ROLES}")
+    updated = auth_store.get_user_by_id(conn, user_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="пользователь не найден")
+    auth_store.set_user_role(conn, user_id, role=payload.role, closed_contour_access=payload.closed_contour_access)
+    return _user_to_out(auth_store.get_user_by_id(conn, user_id))
+
+
 @app.post("/jobs", response_model=JobCreateResponse, status_code=201)
-def create_job(payload: JobCreateRequest, conn=Depends(get_connection)) -> JobCreateResponse:
+def create_job(
+    payload: JobCreateRequest, conn=Depends(get_connection),
+    user: auth_store.User | None = Depends(get_current_user),
+) -> JobCreateResponse:
     job = store.create_job(
         conn,
         center_lon=payload.center.lon,
@@ -131,8 +231,110 @@ def create_job(payload: JobCreateRequest, conn=Depends(get_connection)) -> JobCr
         detail=payload.detail,
         step_names=DEFAULT_STEP_NAMES,
     )
+    if user is not None:
+        auth_store.record_job_ownership(conn, job.id, user.id)
     enqueue_job(str(job.id))
     return JobCreateResponse(id=job.id, status=store.get_job(conn, job.id).status)
+
+
+@app.get("/projects", response_model=list[ProjectOut])
+def list_projects(user: auth_store.User = Depends(require_user), conn=Depends(get_connection)) -> list[ProjectOut]:
+    """«Проекты: участки, модели, версии...» (Шаг 4.10, п. 2) — список
+    задач текущего пользователя. Версии/ЖК/рендеры/ТУ-запросы каждой задачи
+    честно не сведены в один ответ — соответствующие данные (Шаги 3.6-3.12,
+    4.5) не хранят ссылку на `jobs.id` в своих схемах, это отдельная
+    интеграционная работа, не часть этого шага (см. `docs/dashboard.md`)."""
+    projects = []
+    for job_id in auth_store.list_job_ids_for_user(conn, user.id):
+        job = store.get_job(conn, job_id)
+        if job is None:
+            continue
+        projects.append(ProjectOut(
+            id=job.id, center=Center(lon=job.center_lon, lat=job.center_lat), radius_m=job.radius_m,
+            detail=job.detail, status=job.status, created_at=job.created_at, updated_at=job.updated_at,
+        ))
+    return projects
+
+
+@app.get("/me/notifications", response_model=list[NotificationOut])
+def list_my_notifications(
+    unread_only: bool = False, user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> list[NotificationOut]:
+    return [
+        NotificationOut(id=n.id, message=n.message, job_id=n.job_id, created_at=n.created_at, read_at=n.read_at)
+        for n in auth_store.list_notifications(conn, user.id, unread_only=unread_only)
+    ]
+
+
+@app.post("/me/notifications/{notification_id}/read", status_code=204)
+def mark_notification_read(
+    notification_id: int, _user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> Response:
+    auth_store.mark_notification_read(conn, notification_id)
+    return Response(status_code=204)
+
+
+def _job_bbox_wgs84(job: store.Job) -> tuple[float, float, float, float]:
+    zone = pick_msk59_zone(job.center_lon)
+    x, y, zone = wgs84_to_msk59(job.center_lon, job.center_lat, zone)
+    corners = [
+        msk59_to_wgs84(x - job.radius_m, y - job.radius_m, zone),
+        msk59_to_wgs84(x + job.radius_m, y - job.radius_m, zone),
+        msk59_to_wgs84(x - job.radius_m, y + job.radius_m, zone),
+        msk59_to_wgs84(x + job.radius_m, y + job.radius_m, zone),
+    ]
+    lons = [c[0] for c in corners]
+    lats = [c[1] for c in corners]
+    return min(lons), min(lats), max(lons), max(lats)
+
+
+@app.get("/projects/{job_id}/closed-contour", response_model=ClosedContourResponse)
+def get_closed_contour_summary(
+    job_id: uuid.UUID, _user: auth_store.User = Depends(require_closed_contour_access), conn=Depends(get_connection),
+) -> ClosedContourResponse:
+    """Демонстрация реального действия флага `closed_contour_access` (Шаг
+    4.10, п. 1: «доступ к закрытому контуру» — не должность, а право на
+    данные сетей/изысканий, см. `docs/plan.md` п. 10.4): настоящий запрос
+    официальных ограничений (Шаг 3.1) по реальному bbox задачи, а не
+    заглушка."""
+    job = store.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="задача не найдена")
+    constraints_store.ensure_schema(conn)
+    zones = constraints_store.find_zones(conn, _job_bbox_wgs84(job))
+    return ClosedContourResponse(
+        job_id=job.id,
+        zones=[ClosedContourZoneOut(zone_type=z.zone_type, status=z.status, registry_number=z.registry_number) for z in zones],
+    )
+
+
+@app.post("/jobs/{job_id}/share", response_model=ShareLinkResponse)
+def share_job(
+    job_id: uuid.UUID, user: auth_store.User = Depends(require_user), conn=Depends(get_connection),
+) -> ShareLinkResponse:
+    job = store.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="задача не найдена")
+    owner_id = auth_store.get_job_owner(conn, job_id)
+    if owner_id is not None and owner_id != user.id:
+        raise HTTPException(status_code=403, detail="только владелец задачи может создать публичную ссылку")
+    token = auth_store.create_public_link(conn, job_id)
+    return ShareLinkResponse(token=token, public_url=f"/public/{token}")
+
+
+@app.get("/public/{token}")
+def open_public_link(token: str, conn=Depends(get_connection)) -> RedirectResponse:
+    """Публичная ссылка на просмотр модели (Шаг 4.10, п. 4) — честно: не
+    новая граница доступа (см. докстринг `auth.store.create_public_link`),
+    а стабильный, отзываемый адрес прямо во вьюер."""
+    job_id = auth_store.resolve_public_link(conn, token)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="ссылка не найдена или отозвана")
+    files = get_job_files(job_id, conn=conn)
+    viewable = next((f for f in files.files if f.viewer_url), None)
+    if viewable is None:
+        raise HTTPException(status_code=404, detail="для задачи ещё нет готовой модели для просмотра")
+    return RedirectResponse(url=viewable.viewer_url)
 
 
 @app.get("/jobs/{job_id}", response_model=JobOut)

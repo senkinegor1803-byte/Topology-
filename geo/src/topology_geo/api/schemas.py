@@ -76,3 +76,65 @@ class FilesResponse(BaseModel):
     job_id: uuid.UUID
     status: str
     files: list[FileOut]
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str = Field(..., min_length=8, description="Минимум 8 символов")
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    role: str
+    closed_contour_access: bool
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    token: str
+    user: UserOut
+
+
+class RoleUpdateRequest(BaseModel):
+    role: str
+    closed_contour_access: bool = False
+
+
+class ProjectOut(BaseModel):
+    id: uuid.UUID
+    center: Center
+    radius_m: float
+    detail: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationOut(BaseModel):
+    id: int
+    message: str
+    job_id: uuid.UUID | None
+    created_at: datetime
+    read_at: datetime | None
+
+
+class ShareLinkResponse(BaseModel):
+    token: str
+    public_url: str
+
+
+class ClosedContourZoneOut(BaseModel):
+    zone_type: str
+    status: str
+    registry_number: str | None
+
+
+class ClosedContourResponse(BaseModel):
+    job_id: uuid.UUID
+    zones: list[ClosedContourZoneOut]

@@ -54,9 +54,30 @@ def run_job_step_task(job_id: str) -> str | None:
     finally:
         conn.close()
 
-    if executed is not None and job is not None and job.status == store.STATUS_RUNNING:
-        run_job_step_task.delay(job_id)
+    if executed is not None and job is not None:
+        if job.status == store.STATUS_RUNNING:
+            run_job_step_task.delay(job_id)
+        elif job.status in (store.STATUS_DONE, store.STATUS_FAILED):
+            _notify_job_completion(job_id, job.status)
     return executed
+
+
+def _notify_job_completion(job_id: str, status: str) -> None:
+    """«Статусы задач с прогрессом и уведомлениями» (Шаг 4.10, п. 3) — только
+    если у задачи есть владелец (Шаг 4.10: анонимные задачи, Шаг 1.3,
+    уведомлять некого)."""
+    from topology_geo.auth import store as auth_store
+
+    conn = _connect()
+    try:
+        auth_store.ensure_schema(conn)
+        owner_id = auth_store.get_job_owner(conn, job_id)
+        if owner_id is None:
+            return
+        message = "Задача выполнена" if status == store.STATUS_DONE else "Задача завершилась с ошибкой"
+        auth_store.create_notification(conn, user_id=owner_id, message=message, job_id=job_id)
+    finally:
+        conn.close()
 
 
 def enqueue_job(job_id: str) -> None:
