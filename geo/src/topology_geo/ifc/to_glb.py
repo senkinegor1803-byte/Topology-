@@ -89,10 +89,26 @@ def _clean_psets(element: ifcopenshell.entity_instance.entity_instance) -> dict:
 def convert_ifc_to_glb(model: ifcopenshell.file) -> bytes:
     """Собрать GLB из всех объектов с геометрией в `model` (мировые
     координаты). Возвращает бинарное содержимое `.glb`-файла (одним куском —
-    JSON + бинарный буфер в одном контейнере, см. `GLTF2.save_to_bytes`)."""
+    JSON + бинарный буфер в одном контейнере, см. `GLTF2.save_to_bytes`).
+
+    ПРИМЕЧАНИЕ: Террейн (IfcGeographicElement с PredefinedType=TERRAIN) исключён
+    из GLB-конвертации, так как на реалистичных участках его TIN может иметь
+    сотни тысяч вершин (745K на 500м радиус, шаг 1м), приводя к OOM при
+    обработке через ifcopenshell.geom.iterator (проблема не в конкретном
+    геометрическом ядре, а в самой обработке большого меша). Здания и дороги
+    уже содержат свои высоты (посадка на рельеф посчитана на Шаге 2.3), так что
+    рельеф для GLB web-preview опционален. Полное разрешение рельефа остаётся в
+    authoritative site.ifc для BIM-ПО."""
+    terrain_element_ids = set(
+        el.id() for el in model.by_type("IfcGeographicElement")
+        if getattr(el, "PredefinedType", None) == "TERRAIN"
+    )
+
     settings = ifcopenshell.geom.settings()
     settings.set("use-world-coords", True)
-    iterator = ifcopenshell.geom.iterator(settings, model, exclude=list(EXCLUDED_IFC_CLASSES))
+    iterator = ifcopenshell.geom.iterator(
+        settings, model, exclude=list(EXCLUDED_IFC_CLASSES)
+    )
 
     gltf = GLTF2()
     gltf.asset.generator = "topology-geo ifc.to_glb (Шаг 1.9)"
@@ -110,6 +126,10 @@ def convert_ifc_to_glb(model: ifcopenshell.file) -> bytes:
         while True:
             shape = iterator.get()
             element = model.by_id(shape.id)
+            if shape.id in terrain_element_ids:
+                if not iterator.next():
+                    break
+                continue
             verts = shape.geometry.verts
             faces = shape.geometry.faces
             if verts and faces:

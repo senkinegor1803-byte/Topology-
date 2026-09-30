@@ -77,8 +77,11 @@ def test_convert_ifc_to_glb_roundtrips_and_has_all_categories(schema):
 
     gltf = GLTF2.load_from_bytes(data)
     categories = _category_names(gltf)
+    # КАТЕГОРИЯ_TERRAIN исключена из GLB-конвертации чтобы избежать OOM на
+    # больших моделях (террейн на 500м радиус с шагом 1м имеет 745K вершин);
+    # здания уже содержат высоты через посадку на рельеф (Шаг 2.3)
     assert set(categories) == {
-        CATEGORY_TERRAIN, CATEGORY_BUILDINGS, CATEGORY_ROADS,
+        CATEGORY_BUILDINGS, CATEGORY_ROADS,
         CATEGORY_WATER, CATEGORY_RAIL, CATEGORY_TREES,
     }
     assert categories[CATEGORY_BUILDINGS] == ["Здание 1"]
