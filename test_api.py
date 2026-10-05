@@ -50,7 +50,6 @@ job = r.json()
 job_id = job["id"]
 print(f"✅ Задача создана: {job_id}")
 print(f"   Статус: {job['status']}")
-print(f"   Этап: {job['current_step']}")
 
 # 4. Проверка статуса
 print("\n📊 Проверка статуса задачи...")
@@ -58,9 +57,12 @@ r = requests.get(f"{API}/jobs/{job_id}", headers=headers)
 if r.status_code == 200:
     job = r.json()
     print(f"✅ Текущий статус: {job['status']}")
-    print(f"   Этап: {job['current_step']}")
-    print(f"\nГотово! Задача обрабатывается в фоне.")
-    print(f"Проверяй статус: GET /jobs/{job_id}")
-    print(f"Скачивай результаты: GET /models/{job_id}/files")
+    if job['steps']:
+        current = job['steps'][0]
+        print(f"   Текущий этап: {current['step_name']} ({current['status']})")
+    print(f"\n✨ Готово! Задача обрабатывается в фоне.")
+    print(f"📍 ID задачи: {job_id}")
+    print(f"🔍 Проверяй статус: GET /jobs/{job_id}")
+    print(f"📥 Скачивай результаты: GET /models/{job_id}/files")
 else:
     print(f"❌ Ошибка: {r.text}")
