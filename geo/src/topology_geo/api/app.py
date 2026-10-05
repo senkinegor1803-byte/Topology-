@@ -92,10 +92,14 @@ WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 async def get_dashboard():
     """Главная страница — веб-интерфейс"""
     html_path = WEB_DIR / "index.html"
+    import sys
+    print(f"DEBUG: WEB_DIR={WEB_DIR}, exists={WEB_DIR.exists()}", file=sys.stderr)
+    print(f"DEBUG: html_path={html_path}, exists={html_path.exists()}", file=sys.stderr)
     if html_path.exists():
         with open(html_path, 'r', encoding='utf-8') as f:
-            return Response(content=f.read(), media_type="text/html")
-    return Response(content="<h1>Topology Dashboard</h1>", media_type="text/html")
+            content = f.read()
+            return Response(content=content, media_type="text/html")
+    return Response(content="<h1>Topology Dashboard</h1><p>File not found: " + str(html_path) + "</p>", media_type="text/html")
 
 app.mount("/viewer", StaticFiles(directory=VIEWER_DIR), name="viewer")
 app.mount("/citymap", StaticFiles(directory=CITYMAP_DIR), name="citymap")
