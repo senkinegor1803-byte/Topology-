@@ -33,11 +33,12 @@ print(f"✅ Токен получен")
 # 3. Создание задачи на 3D модель
 print("\n🏗️  Создание задачи на генерацию 3D модели...")
 job_data = {
-    "name": "Perm Circus Area",
-    "center_lon": 58.050485,  # Пермь, цирк (долгота)
-    "center_lat": 56.343056,  # Пермь, цирк (широта)
-    "radius_m": 500,          # 500м радиус
-    "project": "perm-project"
+    "center": {
+        "lon": 58.050485,    # Пермь, цирк (долгота)
+        "lat": 56.343056     # Пермь, цирк (широта)
+    },
+    "radius_m": 500,         # 500м радиус (0.5-3 км)
+    "detail": "LOD1"         # Level of Detail: LOD1 (базовая детализация)
 }
 
 r = requests.post(f"{API}/jobs", json=job_data, headers=headers)
