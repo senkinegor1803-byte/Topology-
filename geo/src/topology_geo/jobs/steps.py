@@ -81,6 +81,7 @@ from topology_geo.tiling.grid import (
 )
 from topology_geo.tiling.tile_content import build_tile_content
 from topology_geo.tiling.tileset import TileContentEntry, build_tileset_json
+from topology_geo.cadastre import search_cadastre_by_coords
 
 RELIEF_PIXEL_SIZE_M = 1.0
 RELIEF_MARGIN_M = 200.0
@@ -692,8 +693,91 @@ def package_outputs(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
     return {"meta_storage_key": meta_key, "archive_storage_key": archive_key, "file_count": len(files_meta) + 1}
 
 
+def fetch_cadastre(conn: Any, storage: ObjectStorage, job: store.Job) -> dict:
+    """Шаг: загрузить кадастровые границы участков из НСПД (Росреестр API).
+
+    По координатам центра задачи ищет участки в НСПД, получает границы в GeoJSON.
+    Результаты сохраняются в БД и в JSON-файл в Storage для последующего
+    использования в вьюере и проверках (Шаги 3.3-3.9).
+    """
+    logger = __import__("logging").getLogger("fetch_cadastre")
+
+    try:
+        # Поиск участков в НСПД по координатам
+        cadastre_list = search_cadastre_by_coords(
+            lon=job.center_lon, lat=job.center_lat, radius_m=job.radius_m
+        )
+
+        if not cadastre_list:
+            logger.warning(f"Нет участков в НСПД для {job.center_lon}, {job.center_lat}")
+            return {"cadastre_found": 0, "error": "Участки не найдены"}
+
+        # Сохранить в БД
+        cursor = conn.cursor()
+        for cadastre in cadastre_list:
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO cadastre_data (job_id, cadastre_number, center_lon, center_lat,
+                                              area_m2, owner, address, boundary_geojson)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (job_id, cadastre_number) DO UPDATE SET
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        job.id,
+                        cadastre.cadastre_number,
+                        cadastre.center_lon,
+                        cadastre.center_lat,
+                        cadastre.area_m2,
+                        cadastre.owner,
+                        cadastre.address,
+                        json.dumps(cadastre.boundary_geojson) if cadastre.boundary_geojson else None,
+                    ),
+                )
+                logger.info(f"Сохранён участок {cadastre.cadastre_number}")
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении {cadastre.cadastre_number}: {e}")
+
+        conn.commit()
+
+        # Сохранить GeoJSON в Storage для вьюера
+        geojson_features = []
+        for cadastre in cadastre_list:
+            if cadastre.boundary_geojson:
+                feature = cadastre.boundary_geojson.copy()
+                feature["properties"] = {
+                    "cadastre_number": cadastre.cadastre_number,
+                    "area_m2": cadastre.area_m2,
+                    "owner": cadastre.owner,
+                    "address": cadastre.address,
+                }
+                geojson_features.append(feature)
+
+        if geojson_features:
+            geojson_collection = {"type": "FeatureCollection", "features": geojson_features}
+            key = f"jobs/{job.id}/cadastre_boundaries.geojson"
+            storage.upload(
+                key,
+                json.dumps(geojson_collection, ensure_ascii=False).encode("utf-8"),
+                content_type="application/geo+json",
+            )
+            logger.info(f"Сохранён GeoJSON: {key}")
+
+        return {
+            "cadastre_found": len(cadastre_list),
+            "cadastre_numbers": [c.cadastre_number for c in cadastre_list],
+            "geojson_key": f"jobs/{job.id}/cadastre_boundaries.geojson" if geojson_features else None,
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке кадастра: {e}")
+        return {"cadastre_found": 0, "error": str(e)}
+
+
 DEFAULT_PIPELINE: dict[str, Any] = {
     "select_osm": select_osm,
+    "fetch_cadastre": fetch_cadastre,
     "prepare_relief": prepare_relief,
     "select_and_normalize": select_and_normalize,
     "assemble_ifc": assemble_ifc,
