@@ -84,6 +84,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Топология: API конвейера", version="0.1.0", lifespan=lifespan)
+
+# Веб-интерфейс
+WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+
+@app.get("/", response_class=Response)
+async def get_dashboard():
+    """Главная страница — веб-интерфейс"""
+    html_path = WEB_DIR / "index.html"
+    if html_path.exists():
+        with open(html_path, 'r', encoding='utf-8') as f:
+            return Response(content=f.read(), media_type="text/html")
+    return Response(content="<h1>Topology Dashboard</h1>", media_type="text/html")
+
 app.mount("/viewer", StaticFiles(directory=VIEWER_DIR), name="viewer")
 app.mount("/citymap", StaticFiles(directory=CITYMAP_DIR), name="citymap")
 app.mount("/panorama", StaticFiles(directory=PANORAMA_DIR), name="panorama")
@@ -515,3 +528,99 @@ def export_job_to_pilot_bim(
         exported_files=[str(p) for p in result.exported_files],
         missing_keys=result.missing_keys,
     )
+
+
+# ===== ОТКРЫТЫЕ ЭНДПОИНТЫ ДЛЯ ВЕБ-ИНТЕРФЕЙСА (БЕЗ АВТОРИЗАЦИИ) =====
+
+@app.get("/api/jobs", response_model=list[JobOut])
+def get_all_jobs(conn=Depends(get_connection)) -> list[JobOut]:
+    """Получить все задачи (без авторизации для веб-интерфейса)"""
+    all_jobs = store.list_all_jobs(conn)
+    return [
+        JobOut(
+            id=job.id,
+            center=Center(lon=job.center_lon, lat=job.center_lat),
+            radius_m=job.radius_m,
+            layers=job.layers,
+            detail=job.detail,
+            status=job.status,
+            error_message=job.error_message,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            steps=[
+                JobStepOut(
+                    step_name=step.step_name,
+                    step_order=step.step_order,
+                    status=step.status,
+                    started_at=step.started_at,
+                    finished_at=step.finished_at,
+                    error_message=step.error_message,
+                    result=step.result,
+                )
+                for step in job.steps
+            ],
+        )
+        for job in all_jobs
+    ]
+
+
+@app.post("/api/jobs", response_model=JobCreateResponse)
+def create_job_open(req: JobCreateRequest, conn=Depends(get_connection)):
+    """Создать задачу (без авторизации для веб-интерфейса)"""
+    job = store.Job.new_job(
+        center_lon=req.center.lon,
+        center_lat=req.center.lat,
+        radius_m=req.radius_m,
+        layers=req.layers,
+        detail=req.detail,
+    )
+    
+    # Создать default пользователя если не существует
+    default_user = auth_store.ensure_default_user(conn)
+    
+    job_id = store.insert_job(conn, job, owner_id=default_user.id)
+    enqueue_job(job_id)
+    
+    return JobCreateResponse(id=job_id, status="pending")
+
+
+@app.get("/api/jobs/{job_id}", response_model=JobOut)
+def get_job_open(job_id: uuid.UUID, conn=Depends(get_connection)) -> JobOut:
+    """Получить задачу (без авторизации)"""
+    job = store.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="задача не найдена")
+    return JobOut(
+        id=job.id,
+        center=Center(lon=job.center_lon, lat=job.center_lat),
+        radius_m=job.radius_m,
+        layers=job.layers,
+        detail=job.detail,
+        status=job.status,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        steps=[
+            JobStepOut(
+                step_name=step.step_name,
+                step_order=step.step_order,
+                status=step.status,
+                started_at=step.started_at,
+                finished_at=step.finished_at,
+                error_message=step.error_message,
+                result=step.result,
+            )
+            for step in job.steps
+        ],
+    )
+
+
+@app.get("/api/models/{job_id}/files", response_model=FilesResponse)
+def get_files_open(job_id: uuid.UUID, conn=Depends(get_connection)) -> FilesResponse:
+    """Получить файлы задачи (без авторизации)"""
+    job = store.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="задача не найдена")
+    
+    files = get_job_files(job_id, conn=conn)
+    return files
