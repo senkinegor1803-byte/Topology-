@@ -3,12 +3,14 @@
 
 import requests
 import json
+import time
 
 API = "http://localhost:8000"
 
 # 1. Регистрация
 print("📝 Регистрация...")
-user_data = {"email": "test@example.com", "password": "test123456"}
+email = f"test_{int(time.time())}@example.com"
+user_data = {"email": email, "password": "test123456"}
 r = requests.post(f"{API}/auth/register", json=user_data)
 if r.status_code != 201:
     print(f"❌ Ошибка регистрации: {r.text}")
