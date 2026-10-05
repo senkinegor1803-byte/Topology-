@@ -48,6 +48,27 @@ services:
   #     timeout: 5s
   #     retries: 10
 
+  api:
+    build:
+      context: ../geo
+    command: python -m uvicorn src.topology_geo.api.app:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      POSTGRES_HOST: postgis
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-topology}
+      POSTGRES_USER: ${POSTGRES_USER:-topology}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-topology}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgis:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../geo:/app
+
   worker:
     build:
       context: ../geo
