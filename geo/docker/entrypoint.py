@@ -16,22 +16,28 @@ from topology_geo.devcheck import check_minio, check_postgres, check_redis, load
 
 def main() -> int:
     config = load_environment_config()
-    checks = {
+    critical_checks = {
         "PostGIS": check_postgres(config.postgres),
         "Redis": check_redis(config.redis_url),
+    }
+    optional_checks = {
         "MinIO": check_minio(config.minio),
     }
 
-    all_ok = True
-    for name, (ok, detail) in checks.items():
+    all_critical_ok = True
+    for name, (ok, detail) in critical_checks.items():
         print(f"[{'OK' if ok else 'FAIL'}] {name}: {detail}")
-        all_ok = all_ok and ok
+        all_critical_ok = all_critical_ok and ok
 
-    if not all_ok:
-        print("Не все сервисы окружения доступны — см. вывод выше.")
+    for name, (ok, detail) in optional_checks.items():
+        status = "OK" if ok else "WARN"
+        print(f"[{status}] {name}: {detail}")
+
+    if not all_critical_ok:
+        print("Критичные сервисы недоступны — см. вывод выше.")
         return 1
 
-    print("Все сервисы окружения доступны. Ожидание задач (Celery — Шаг 1.3)...")
+    print("Критичные сервисы доступны. Ожидание задач (Celery — Шаг 1.3)...")
     while True:
         time.sleep(3600)
 

@@ -72,6 +72,7 @@ services:
   worker:
     build:
       context: ../geo
+    command: python -m celery -A topology_geo.tasks.celery_app worker --loglevel=info
     environment:
       POSTGRES_HOST: postgis
       POSTGRES_PORT: "5432"
@@ -79,9 +80,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-topology}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-topology}
       REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-topology}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-topology12345}
     depends_on:
       postgis:
         condition: service_healthy
@@ -99,9 +97,6 @@ services:
       dockerfile: ../infra/render-worker.Dockerfile
     environment:
       REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-topology}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-topology12345}
     depends_on:
       redis:
         condition: service_healthy
