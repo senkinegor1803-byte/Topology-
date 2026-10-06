@@ -827,21 +827,23 @@ def get_all_jobs(conn=Depends(get_connection)) -> list[JobOut]:
 @app.post("/api/jobs", response_model=JobCreateResponse)
 def create_job_open(req: JobCreateRequest, conn=Depends(get_connection)):
     """Создать задачу (без авторизации для веб-интерфейса)"""
-    job = store.Job.new_job(
+    from topology_geo.jobs.steps import DEFAULT_STEP_NAMES
+
+    job = store.create_job(
+        conn,
         center_lon=req.center.lon,
         center_lat=req.center.lat,
         radius_m=req.radius_m,
         layers=req.layers,
         detail=req.detail,
+        step_names=DEFAULT_STEP_NAMES,
     )
-    
-    # Создать default пользователя если не существует
+
     default_user = auth_store.ensure_default_user(conn)
-    
-    job_id = store.insert_job(conn, job, owner_id=default_user.id)
-    enqueue_job(job_id)
-    
-    return JobCreateResponse(id=job_id, status="pending")
+    auth_store.record_job_ownership(conn, job.id, default_user.id)
+    enqueue_job(str(job.id))
+
+    return JobCreateResponse(id=job.id, status="pending")
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobOut)

@@ -224,6 +224,39 @@ def fail_step(conn: _Connection, job_id: uuid.UUID | str, step_name: str, error_
     _recompute_job_status(conn, job_id)
 
 
+def list_all_jobs(conn: _Connection) -> list[Job]:
+    """Получить все задачи."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, center_lon, center_lat, radius_m, layers, detail, status, error_message, "
+            "created_at, updated_at FROM jobs ORDER BY created_at DESC"
+        )
+        rows = cur.fetchall()
+
+    jobs = []
+    for row in rows:
+        job_id = row[0]
+        cur.execute(
+            "SELECT step_name, step_order, status, started_at, finished_at, error_message, result "
+            "FROM job_steps WHERE job_id = %s ORDER BY step_order",
+            (str(job_id),),
+        )
+        step_rows = cur.fetchall()
+        steps = [
+            JobStep(
+                step_name=r[0], step_order=r[1], status=r[2], started_at=r[3],
+                finished_at=r[4], error_message=r[5], result=r[6],
+            )
+            for r in step_rows
+        ]
+        jobs.append(Job(
+            id=row[0], center_lon=row[1], center_lat=row[2], radius_m=row[3], layers=row[4],
+            detail=row[5], status=row[6], error_message=row[7], created_at=row[8], updated_at=row[9],
+            steps=steps,
+        ))
+    return jobs
+
+
 def retry_failed_step(conn: _Connection, job_id: uuid.UUID | str) -> JobStep:
     """Сбросить упавший шаг в pending, не трогая уже готовые (done) шаги —
     следующий прогон конвейера (`jobs.pipeline.run_next_step`) продолжит с
