@@ -233,27 +233,28 @@ def list_all_jobs(conn: _Connection) -> list[Job]:
         )
         rows = cur.fetchall()
 
-    jobs = []
-    for row in rows:
-        job_id = row[0]
-        cur.execute(
-            "SELECT step_name, step_order, status, started_at, finished_at, error_message, result "
-            "FROM job_steps WHERE job_id = %s ORDER BY step_order",
-            (str(job_id),),
-        )
-        step_rows = cur.fetchall()
-        steps = [
-            JobStep(
-                step_name=r[0], step_order=r[1], status=r[2], started_at=r[3],
-                finished_at=r[4], error_message=r[5], result=r[6],
+        jobs = []
+        for row in rows:
+            job_id = row[0]
+            cur.execute(
+                "SELECT step_name, step_order, status, started_at, finished_at, error_message, result "
+                "FROM job_steps WHERE job_id = %s ORDER BY step_order",
+                (str(job_id),),
             )
-            for r in step_rows
-        ]
-        jobs.append(Job(
-            id=row[0], center_lon=row[1], center_lat=row[2], radius_m=row[3], layers=row[4],
-            detail=row[5], status=row[6], error_message=row[7], created_at=row[8], updated_at=row[9],
-            steps=steps,
-        ))
+            step_rows = cur.fetchall()
+            steps = [
+                JobStep(
+                    step_name=r[0], step_order=r[1], status=r[2], started_at=r[3],
+                    finished_at=r[4], error_message=r[5], result=r[6],
+                )
+                for r in step_rows
+            ]
+            jobs.append(Job(
+                id=row[0], center_lon=row[1], center_lat=row[2], radius_m=row[3], layers=row[4],
+                detail=row[5], status=row[6], error_message=row[7], created_at=row[8], updated_at=row[9],
+                steps=steps,
+            ))
+
     return jobs
 
 
