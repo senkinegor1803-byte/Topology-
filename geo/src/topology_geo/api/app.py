@@ -839,10 +839,7 @@ def create_job_open(req: JobCreateRequest, conn=Depends(get_connection)):
         step_names=DEFAULT_STEP_NAMES,
     )
 
-    default_user = auth_store.ensure_default_user(conn)
-    auth_store.record_job_ownership(conn, job.id, default_user.id)
     enqueue_job(str(job.id))
-
     return JobCreateResponse(id=job.id, status="pending")
 
 
